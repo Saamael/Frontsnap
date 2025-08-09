@@ -248,3 +248,146 @@ export const validateLoginForm = (data: {
     errors
   };
 };
+
+// Search query validation
+export const validateSearchQuery = (query: string): ValidationResult => {
+  const sanitizedQuery = query.trim();
+  
+  if (!sanitizedQuery) {
+    return { isValid: false, error: 'Search query cannot be empty' };
+  }
+  
+  if (sanitizedQuery.length < 2) {
+    return { isValid: false, error: 'Search query must be at least 2 characters' };
+  }
+  
+  if (sanitizedQuery.length > 100) {
+    return { isValid: false, error: 'Search query is too long (maximum 100 characters)' };
+  }
+  
+  // Remove potentially dangerous patterns
+  const cleanQuery = sanitizedQuery
+    .replace(/[<>\"'&]/g, '') // Remove HTML/SQL injection characters
+    .replace(/javascript:/gi, '')
+    .replace(/script/gi, '');
+  
+  // Check for remaining suspicious patterns
+  if (cleanQuery.includes('DROP') || cleanQuery.includes('DELETE') || cleanQuery.includes('UPDATE')) {
+    return { isValid: false, error: 'Invalid search query' };
+  }
+  
+  return { isValid: true, sanitizedValue: cleanQuery };
+};
+
+// Review validation
+export const validateReview = (data: {
+  rating: number;
+  comment: string;
+}): { isValid: boolean; errors: { [key: string]: string } } => {
+  const errors: { [key: string]: string } = {};
+  
+  const ratingValidation = validateRating(data.rating);
+  if (!ratingValidation.isValid) {
+    errors.rating = ratingValidation.error!;
+  }
+  
+  const commentValidation = sanitizeText(data.comment, 500);
+  if (!commentValidation.isValid) {
+    errors.comment = commentValidation.error!;
+  }
+  
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors
+  };
+};
+
+// Phone number validation (optional)
+export const validatePhoneNumber = (phone: string): ValidationResult => {
+  const sanitizedPhone = phone.trim().replace(/\D/g, ''); // Remove non-digits
+  
+  if (!sanitizedPhone) {
+    return { isValid: true, sanitizedValue: '' }; // Phone is optional
+  }
+  
+  // Basic international phone number validation
+  if (sanitizedPhone.length < 10 || sanitizedPhone.length > 15) {
+    return { isValid: false, error: 'Phone number must be between 10-15 digits' };
+  }
+  
+  return { isValid: true, sanitizedValue: sanitizedPhone };
+};
+
+// Collection name validation
+export const validateCollectionName = (name: string): ValidationResult => {
+  const sanitizedName = name.trim();
+  
+  if (!sanitizedName) {
+    return { isValid: false, error: 'Collection name is required' };
+  }
+  
+  if (sanitizedName.length < 3) {
+    return { isValid: false, error: 'Collection name must be at least 3 characters' };
+  }
+  
+  if (sanitizedName.length > 50) {
+    return { isValid: false, error: 'Collection name is too long (maximum 50 characters)' };
+  }
+  
+  // Allow letters, numbers, spaces, and common punctuation
+  const nameRegex = /^[a-zA-Z0-9\s\-_'.!?]+$/;
+  if (!nameRegex.test(sanitizedName)) {
+    return { isValid: false, error: 'Collection name contains invalid characters' };
+  }
+  
+  return { isValid: true, sanitizedValue: sanitizedName };
+};
+
+// Generic input sanitizer for preventing XSS
+export const sanitizeInput = (input: string, maxLength: number = 255): string => {
+  if (typeof input !== 'string') {
+    return '';
+  }
+  
+  return input
+    .trim()
+    .slice(0, maxLength)
+    .replace(/[<>\"'&]/g, (match) => {
+      const htmlEntities: { [key: string]: string } = {
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#x27;',
+        '&': '&amp;',
+      };
+      return htmlEntities[match] || match;
+    });
+};
+
+// Batch validation utility
+export const validateFields = (
+  fields: { [key: string]: any },
+  validators: { [key: string]: (value: any) => ValidationResult }
+): { isValid: boolean; errors: { [key: string]: string }; sanitizedData: { [key: string]: any } } => {
+  const errors: { [key: string]: string } = {};
+  const sanitizedData: { [key: string]: any } = {};
+  
+  Object.keys(fields).forEach(field => {
+    if (validators[field]) {
+      const result = validators[field](fields[field]);
+      if (!result.isValid) {
+        errors[field] = result.error!;
+      } else {
+        sanitizedData[field] = result.sanitizedValue !== undefined ? result.sanitizedValue : fields[field];
+      }
+    } else {
+      sanitizedData[field] = fields[field];
+    }
+  });
+  
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    sanitizedData
+  };
+};

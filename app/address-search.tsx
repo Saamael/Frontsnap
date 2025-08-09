@@ -14,7 +14,8 @@ import { useRouter } from 'expo-router';
 import { ArrowLeft, Search, MapPin, Navigation } from 'lucide-react-native';
 import * as Location from 'expo-location';
 import { searchPlacesByText } from '@/lib/google-places';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useLocation } from '@/contexts/LocationContext';
+import { useHaptics } from '@/hooks/useHaptics';
 
 interface SearchResult {
   place_id: string;
@@ -35,16 +36,17 @@ export default function AddressSearchScreen() {
   const [isSearching, setIsSearching] = useState(false);
   const [isGettingLocation, setIsGettingLocation] = useState(false);
   const [popularLocations] = useState<string[]>([
+    'Da Nang, Vietnam',
+    'Bangkok, Thailand', 
+    'Singapore',
+    'Tokyo, Japan',
     'San Francisco, CA',
     'New York, NY',
-    'Los Angeles, CA',
-    'Chicago, IL',
-    'Miami, FL',
-    'Seattle, WA',
-    'Austin, TX',
-    'Boston, MA'
+    'London, United Kingdom',
+    'Paris, France'
   ]);
   const mounted = useRef(true);
+  const haptics = useHaptics();
 
   useEffect(() => {
     mounted.current = true;
@@ -54,6 +56,7 @@ export default function AddressSearchScreen() {
   }, []);
 
   const handleBack = () => {
+    haptics.navigationBack(); // Haptic feedback for navigation
     router.back();
   };
 
@@ -65,15 +68,18 @@ export default function AddressSearchScreen() {
 
     setIsSearching(true);
     try {
-      console.log('Searching for:', query);
+      console.log('🔍 Searching for:', query);
+      
+      // Use Google Places API for comprehensive search
+      console.log('🗺️ Searching Google Places API...');
       const results = await searchPlacesByText(query);
-      console.log('Search results:', results.length);
+      console.log('🗺️ Found', results.length, 'Google Places results');
       
       if (mounted.current) {
         setSearchResults(results);
       }
     } catch (error) {
-      console.error('Error searching places:', error);
+      console.error('❌ Error searching places:', error);
       if (mounted.current) {
         Alert.alert('Search Error', 'Failed to search for places. Please try again.');
       }
@@ -83,6 +89,8 @@ export default function AddressSearchScreen() {
       }
     }
   };
+
+  const { updateLocation } = useLocation();
 
   const handleUseCurrentLocation = async () => {
     setIsGettingLocation(true);
@@ -106,18 +114,25 @@ export default function AddressSearchScreen() {
         const { city, country } = reverseGeocode[0];
         const address = `${city}, ${country}`;
 
-        // Save location to AsyncStorage
+        // Create location data
         const locationData = {
-          city: city,
-          country: country,
+          city: city || 'Current Location',
+          country: country || 'Unknown',
           latitude: location.coords.latitude,
           longitude: location.coords.longitude,
           isCurrentLocation: true
         };
         
-        await AsyncStorage.setItem('selectedLocation', JSON.stringify(locationData));
-        console.log('Location updated to:', address);
-        router.back();
+        try {
+          // Use LocationContext to update location (handles both state and AsyncStorage)
+          await updateLocation(locationData);
+          haptics.selectionFeedback(); // Haptic feedback for location selection
+          console.log('✅ Location updated successfully via LocationContext:', address);
+          router.back();
+        } catch (updateError) {
+          console.error('❌ Error updating location via context:', updateError);
+          Alert.alert('Update Failed', 'Failed to update location. Please try again.');
+        }
       }
     } catch (error) {
       console.error('Error getting current location:', error);
@@ -132,11 +147,11 @@ export default function AddressSearchScreen() {
   };
 
   const handleSelectLocation = async (result: SearchResult) => {
-    console.log('Selected location:', result.name, result.formatted_address);
+    console.log('🎯 Selected location:', result.name, result.formatted_address);
     
     // Parse the address to get city and country more intelligently
     const addressParts = result.formatted_address.split(', ');
-    console.log('Address parts:', addressParts);
+    console.log('📍 Address parts:', addressParts);
     
     let city, country;
     
@@ -154,7 +169,7 @@ export default function AddressSearchScreen() {
       country = result.formatted_address;
     }
     
-    // Save location to AsyncStorage
+    // Create location data
     const locationData = {
       city: city,
       country: country,
@@ -163,11 +178,21 @@ export default function AddressSearchScreen() {
       isCurrentLocation: false
     };
     
-    await AsyncStorage.setItem('selectedLocation', JSON.stringify(locationData));
-    console.log('Location saved:', locationData);
-
-    // Navigate back to the previous screen
-    router.back();
+    console.log('💾 Updating location via LocationContext:', locationData);
+    
+    try {
+      // Use LocationContext to update location (handles both state and AsyncStorage)
+      await updateLocation(locationData);
+      haptics.selectionFeedback(); // Haptic feedback for location selection
+      
+      console.log('✅ Location updated successfully via LocationContext - navigating back...');
+      
+      // Navigate back - location will update instantly in header
+      router.back();
+    } catch (error) {
+      console.error('❌ Error updating location:', error);
+      Alert.alert('Update Failed', 'Failed to update location. Please try again.');
+    }
   };
 
   const handlePopularLocationSearch = async (locationName: string) => {
@@ -263,9 +288,9 @@ export default function AddressSearchScreen() {
           /* Popular Locations */
           <View style={styles.popularContainer}>
             <Text style={styles.sectionTitle}>Popular Locations</Text>
-            {popularLocations.map((location, index) => (
+            {popularLocations.map((location) => (
               <TouchableOpacity
-                key={index}
+                key={location}
                 style={styles.popularItem}
                 onPress={() => handlePopularLocationSearch(location)}
                 activeOpacity={0.7}

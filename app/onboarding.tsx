@@ -7,11 +7,14 @@ import {
   TouchableOpacity,
   Image,
   Dimensions,
+  StatusBar,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Camera, Search, Heart, Gem, ChevronRight } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { Colors, Typography, Spacing } from '@/constants/theme';
+import { Button } from '@/components/Button';
 
 const { width } = Dimensions.get('window');
 
@@ -89,13 +92,19 @@ export default function OnboardingScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#F8F9FA" translucent={false} />
       <LinearGradient
         colors={['#F8F9FA', '#FFFFFF']}
         style={styles.gradient}
       >
         {/* Skip Button */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleSkip}>
+          <TouchableOpacity 
+            onPress={handleSkip}
+            accessibilityRole="button"
+            accessibilityLabel="Skip onboarding"
+            accessibilityHint="Skip the introduction and go to main app"
+          >
             <Text style={styles.skipText}>Skip</Text>
           </TouchableOpacity>
         </View>
@@ -133,15 +142,18 @@ export default function OnboardingScreen() {
 
         {/* Bottom Actions */}
         <View style={styles.bottomActions}>
-          <TouchableOpacity
-            style={[styles.nextButton, { backgroundColor: step.color }]}
+          <Button
+            title={currentStep === onboardingSteps.length - 1 ? 'Get Started' : 'Next'}
             onPress={handleNext}
-          >
-            <Text style={styles.nextButtonText}>
-              {currentStep === onboardingSteps.length - 1 ? 'Get Started' : 'Next'}
-            </Text>
-            <ChevronRight size={20} color="#FFFFFF" strokeWidth={2} />
-          </TouchableOpacity>
+            variant="primary"
+            size="large"
+            fullWidth
+            icon={<ChevronRight size={20} color="#FFFFFF" strokeWidth={2} />}
+            iconPosition="right"
+            accessibilityLabel={currentStep === onboardingSteps.length - 1 ? 'Get Started' : 'Next step'}
+            accessibilityHint={currentStep === onboardingSteps.length - 1 ? 'Complete onboarding and start using FrontSnap' : 'Continue to next onboarding step'}
+            style={{ backgroundColor: step.color }}
+          />
 
           {/* Step Counter */}
           <Text style={styles.stepCounter}>
@@ -156,6 +168,7 @@ export default function OnboardingScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#F8F9FA',
   },
   gradient: {
     flex: 1,
@@ -167,9 +180,7 @@ const styles = StyleSheet.create({
     paddingTop: 20,
   },
   skipText: {
-    fontSize: 16,
-    color: '#8E8E93',
-    fontWeight: '500',
+    ...Typography.styles.label,
   },
   content: {
     flex: 1,
@@ -206,17 +217,14 @@ const styles = StyleSheet.create({
     marginBottom: 48,
   },
   stepTitle: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#000000',
+    ...Typography.styles.h2,
     textAlign: 'center',
-    marginBottom: 16,
+    marginBottom: Spacing.base,
   },
   stepDescription: {
-    fontSize: 16,
-    color: '#8E8E93',
+    ...Typography.styles.body1,
+    color: Colors.textSecondary,
     textAlign: 'center',
-    lineHeight: 24,
     maxWidth: 280,
   },
   progressContainer: {
@@ -247,15 +255,15 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     gap: 8,
     width: '100%',
+    borderWidth: 0,
+    shadowColor: 'transparent',
+    elevation: 0,
   },
   nextButtonText: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '600',
+    ...Typography.styles.button,
+    fontSize: Typography.fontSize.lg,
   },
   stepCounter: {
-    fontSize: 14,
-    color: '#8E8E93',
-    fontWeight: '500',
+    ...Typography.styles.label,
   },
 });

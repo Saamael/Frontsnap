@@ -93,7 +93,7 @@ const getGooglePlaceTypes = (businessType: string): string[] => {
   return ['establishment'];
 };
 
-// Enhanced nearby search with business type filtering
+// Enhanced nearby search with business type filtering and location context
 export const searchNearbyPlacesWithType = async (
   latitude: number,
   longitude: number,
@@ -113,9 +113,18 @@ export const searchNearbyPlacesWithType = async (
         lat: latitude.toString(),
         lng: longitude.toString(),
         radius: radius.toString(),
-        keyword: businessName,
         place_type: placeType
       });
+      
+      // Only add keyword if business name is not "Unknown" or generic
+      const isGenericName = !businessName || 
+                           businessName.toLowerCase() === 'unknown' || 
+                           businessName.toLowerCase() === 'unknown business' ||
+                           businessName.toLowerCase() === 'business';
+      
+      if (!isGenericName) {
+        params.set('keyword', businessName);
+      }
 
       console.log(`🔍 Searching with type "${placeType}" and keyword "${businessName}"`);
 
@@ -146,13 +155,21 @@ export const searchNearbyPlacesWithType = async (
         // Filter results to match business type
         const filteredResults = data.results.filter((place: GooglePlace) => {
           const hasMatchingType = place.types.some(type => placeTypes.includes(type));
-          const nameMatch = place.name.toLowerCase().includes(businessName.toLowerCase()) ||
+          
+          // If business name is unknown/generic, skip name matching and just use type matching
+          const isGenericName = !businessName || 
+                               businessName.toLowerCase() === 'unknown' || 
+                               businessName.toLowerCase() === 'unknown business' ||
+                               businessName.toLowerCase() === 'business';
+          
+          const nameMatch = isGenericName || 
+                           place.name.toLowerCase().includes(businessName.toLowerCase()) ||
                            businessName.toLowerCase().includes(place.name.toLowerCase());
           
           console.log(`🔎 Checking place: ${place.name}`);
           console.log(`  - Types: ${place.types.join(', ')}`);
           console.log(`  - Has matching type: ${hasMatchingType}`);
-          console.log(`  - Name match: ${nameMatch}`);
+          console.log(`  - Name match: ${nameMatch} (generic name: ${isGenericName})`);
           
           return hasMatchingType && nameMatch;
         });
@@ -176,7 +193,7 @@ export const searchNearbyPlacesWithType = async (
   }
 };
 
-// Search for nearby places using Google Places API via proxy
+// Search for nearby places using Google Places API via proxy with contextual filtering
 export const searchNearbyPlaces = async (
   latitude: number,
   longitude: number,

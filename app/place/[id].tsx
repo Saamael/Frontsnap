@@ -6,12 +6,16 @@ import {
   SafeAreaView,
   ScrollView,
   TouchableOpacity,
-  Image,
   TextInput,
   Alert,
   Modal,
   ActivityIndicator,
+  Share as RNShare,
+  FlatList,
+  PanResponder,
+  Dimensions,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { 
   ArrowLeft, 
   Star, 
@@ -27,7 +31,10 @@ import {
   Trash2,
   Flag,
   Share,
-  Bookmark
+  Bookmark,
+  ChevronDown,
+  ChevronUp,
+  Copy
 } from 'lucide-react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { 
@@ -49,12 +56,58 @@ import {
   PlacePhoto
 } from '@/lib/supabase';
 import * as ImagePicker from 'expo-image-picker';
+import { Linking } from 'react-native';
 
 interface ReviewWithReplies extends Review {
   replies?: ReviewWithReplies[];
   canEdit?: boolean;
   canDelete?: boolean;
 }
+
+// Working Hours Section Component (simplified to match Option 1)
+const WorkingHoursSection = ({ hours }: { hours: string[] }) => {
+  const [showFullHours, setShowFullHours] = useState(false);
+  
+  const getTodayHours = (weekHours: string[]): string => {
+    if (!weekHours || weekHours.length === 0) return 'Hours not available';
+    
+    const today = new Date().getDay(); // 0 = Sunday, 1 = Monday, etc.
+    const dayIndex = today === 0 ? 6 : today - 1; // Convert to Monday = 0 format
+    
+    if (weekHours[dayIndex]) {
+      const dayHours = weekHours[dayIndex];
+      // Extract just the hours part (after the colon)
+      const hoursMatch = dayHours.match(/:\s*(.+)/);
+      return hoursMatch ? hoursMatch[1] : dayHours;
+    }
+    
+    return 'Hours not available';
+  };
+  
+  return (
+    <View style={styles.hoursSection}>
+      <TouchableOpacity 
+        style={styles.hoursDropdown}
+        onPress={() => setShowFullHours(!showFullHours)}
+      >
+        <Text style={styles.hoursText}>{getTodayHours(hours)}</Text>
+        {showFullHours ? (
+          <ChevronUp size={14} color="#8E8E93" strokeWidth={2} />
+        ) : (
+          <ChevronDown size={14} color="#8E8E93" strokeWidth={2} />
+        )}
+      </TouchableOpacity>
+      
+      {showFullHours && (
+        <View style={styles.fullHours}>
+          {hours.map((dayHours, index) => (
+            <Text key={index} style={styles.dayHours}>{dayHours}</Text>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+};
 
 export default function PlaceDetailsScreen() {
   const router = useRouter();
@@ -66,6 +119,10 @@ export default function PlaceDetailsScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [showPhotoModal, setShowPhotoModal] = useState(false);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [showImageViewer, setShowImageViewer] = useState(false);
+  const [selectedImageIndex, setSelectedImageIndex] = useState(0);
+  const [userCollections, setUserCollections] = useState<any[]>([]);
   const [reviewText, setReviewText] = useState('');
   const [reviewRating, setReviewRating] = useState(5);
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
@@ -84,6 +141,12 @@ export default function PlaceDetailsScreen() {
       mounted.current = false;
     };
   }, [id]);
+
+  useEffect(() => {
+    if (showSaveModal && currentUser) {
+      loadUserCollections();
+    }
+  }, [showSaveModal, currentUser]);
 
   const loadPlaceDetails = async () => {
     try {
@@ -141,6 +204,60 @@ export default function PlaceDetailsScreen() {
 
   const handleBack = () => {
     router.back();
+  };
+
+  const handleSharePlace = async () => {
+    if (!place) return;
+    
+    try {
+      const shareUrl = `frontsnap://place/${place.id}`;
+      await RNShare.share({
+        message: `Check out ${place.name} on FrontSnap! ${shareUrl}`,
+        url: shareUrl,
+        title: `${place.name} - ${place.category}`,
+      });
+    } catch (error) {
+      console.error('Error sharing place:', error);
+      Alert.alert('Error', 'Failed to share place');
+    }
+  };
+
+  const handleSaveToCollection = async (collectionId: string) => {
+    if (!place || !currentUser) return;
+    
+    try {
+      // TODO: Implement save to collection in supabase
+      // await addPlaceToCollection(place.id, collectionId, currentUser.id);
+      setShowSaveModal(false);
+      Alert.alert('Success', 'Place saved to collection!');
+    } catch (error) {
+      console.error('Error saving to collection:', error);
+      Alert.alert('Error', 'Failed to save to collection');
+    }
+  };
+
+  const handleImagePress = (index: number) => {
+    setSelectedImageIndex(index);
+    setShowImageViewer(true);
+  };
+
+  const loadUserCollections = async () => {
+    if (!currentUser) return;
+    
+    try {
+      // TODO: Implement getUserCollections from supabase
+      // const collections = await getUserCollections(currentUser.id);
+      // setUserCollections(collections || []);
+      
+      // Mock data for now
+      setUserCollections([
+        { id: '1', name: 'Favorites', place_count: 5 },
+        { id: '2', name: 'Coffee Shops', place_count: 12 },
+        { id: '3', name: 'Weekend Spots', place_count: 8 },
+      ]);
+    } catch (error) {
+      console.error('Error loading collections:', error);
+    }
   };
 
   const handleAddReview = () => {
@@ -257,7 +374,7 @@ export default function PlaceDetailsScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              if (!place) return;
+              if (!place || !currentUser) return;
               const { error } = await deletePlace(place.id);
               if (error) {
                 Alert.alert('Error', 'Failed to delete place');
@@ -283,23 +400,79 @@ export default function PlaceDetailsScreen() {
   const handleAddPhoto = async () => {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: 'images',
         allowsEditing: true,
         aspect: [4, 3],
         quality: 0.8,
       });
 
-      if (!result.canceled && result.assets[0]) {
-        // TODO: Upload photo to storage and add to place
-        const newPhotoUri = result.assets[0].uri;
-        setPlacePhotos(prev => [...prev, newPhotoUri]);
-        setShowPhotoModal(false);
-        Alert.alert('Success', 'Photo added successfully!');
+      if (!result.canceled && result.assets[0] && place && currentUser) {
+        const photoUri = result.assets[0].uri;
+        
+        try {
+          // Upload photo to Supabase storage and add to place
+          const { data, error } = await addPlacePhoto({
+            place_id: place.id,
+            user_id: currentUser.id,
+            photo_url: photoUri, // In production, this would be uploaded to storage first
+            caption: ''
+          });
+          
+          if (error) {
+            throw error;
+          }
+          
+          // Add to local state immediately for better UX
+          setPlacePhotos(prev => [...prev, photoUri]);
+          setShowPhotoModal(false);
+          Alert.alert('Success', 'Photo uploaded successfully!');
+          
+          // Reload place details to get updated photos from server
+          await loadPlaceDetails();
+        } catch (uploadError) {
+          console.error('Error uploading photo:', uploadError);
+          Alert.alert('Error', 'Failed to upload photo. Please try again.');
+        }
       }
     } catch (error) {
-      console.error('Error adding photo:', error);
-      Alert.alert('Error', 'Failed to add photo');
+      console.error('Error selecting photo:', error);
+      Alert.alert('Error', 'Failed to select photo');
     }
+  };
+
+  const handleAddressPress = (address: string, name: string, latitude: number, longitude: number) => {
+    Alert.alert(
+      'Address Options',
+      address,
+      [
+        {
+          text: 'Google Maps',
+          onPress: () => {
+            const googleUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}&query=${encodeURIComponent(address)}`;
+            Linking.openURL(googleUrl);
+          }
+        },
+        {
+          text: 'Apple Maps',
+          onPress: () => {
+            const appleUrl = `http://maps.apple.com/?q=${encodeURIComponent(name)}&ll=${latitude},${longitude}`;
+            Linking.openURL(appleUrl);
+          }
+        },
+        {
+          text: 'Copy Address',
+          onPress: () => {
+            Alert.alert('Address', address, [
+              { text: 'OK', style: 'default' }
+            ]);
+          }
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel'
+        }
+      ]
+    );
   };
 
   const handleTakePhoto = async () => {
@@ -310,12 +483,33 @@ export default function PlaceDetailsScreen() {
         quality: 0.8,
       });
 
-      if (!result.canceled && result.assets[0]) {
-        // TODO: Upload photo to storage and add to place
-        const newPhotoUri = result.assets[0].uri;
-        setPlacePhotos(prev => [...prev, newPhotoUri]);
-        setShowPhotoModal(false);
-        Alert.alert('Success', 'Photo added successfully!');
+      if (!result.canceled && result.assets[0] && place && currentUser) {
+        const photoUri = result.assets[0].uri;
+        
+        try {
+          // Upload photo to Supabase storage and add to place
+          const { data, error } = await addPlacePhoto({
+            place_id: place.id,
+            user_id: currentUser.id,
+            photo_url: photoUri, // In production, this would be uploaded to storage first
+            caption: ''
+          });
+          
+          if (error) {
+            throw error;
+          }
+          
+          // Add to local state immediately for better UX
+          setPlacePhotos(prev => [...prev, photoUri]);
+          setShowPhotoModal(false);
+          Alert.alert('Success', 'Photo uploaded successfully!');
+          
+          // Reload place details to get updated photos from server
+          await loadPlaceDetails();
+        } catch (uploadError) {
+          console.error('Error uploading photo:', uploadError);
+          Alert.alert('Error', 'Failed to upload photo. Please try again.');
+        }
       }
     } catch (error) {
       console.error('Error taking photo:', error);
@@ -404,10 +598,10 @@ export default function PlaceDetailsScreen() {
         </TouchableOpacity>
         
         <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.headerButton}>
+          <TouchableOpacity style={styles.headerButton} onPress={handleSharePlace}>
             <Share size={20} color="#000000" strokeWidth={2} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.headerButton}>
+          <TouchableOpacity style={styles.headerButton} onPress={() => setShowSaveModal(true)}>
             <Bookmark size={20} color="#000000" strokeWidth={2} />
           </TouchableOpacity>
           {canDeletePlace && (
@@ -421,9 +615,33 @@ export default function PlaceDetailsScreen() {
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {/* Photo Gallery */}
         <View style={styles.photoSection}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.photoGallery}>
+          <ScrollView 
+            horizontal 
+            showsHorizontalScrollIndicator={false} 
+            style={styles.photoGallery}
+            decelerationRate="fast"
+            snapToInterval={200}
+            snapToAlignment="start"
+          >
             {placePhotos.map((photo, index) => (
-              <Image key={index} source={{ uri: photo }} style={styles.placePhoto} />
+              <TouchableOpacity 
+                key={`photo-${index}`} 
+                onPress={() => handleImagePress(index)}
+                style={styles.photoTouchable}
+              >
+                <Image 
+                  source={{ uri: photo }} 
+                  style={styles.placePhoto}
+                  contentFit="cover"
+                  transition={300}
+                  cachePolicy="memory-disk"
+                  priority="high"
+                  placeholder="L6PZfSi_.AyE_3t7t7R**0o#DgR4"
+                  onError={(error) => {
+                    console.error('Image loading error:', error);
+                  }}
+                />
+              </TouchableOpacity>
             ))}
           </ScrollView>
           
@@ -451,18 +669,16 @@ export default function PlaceDetailsScreen() {
             </View>
           </View>
 
-          <View style={styles.placeLocation}>
+          <TouchableOpacity 
+            style={styles.placeLocation}
+            onPress={() => handleAddressPress(place.address, place.name, place.latitude, place.longitude)}
+          >
             <MapPin size={16} color="#8E8E93" strokeWidth={2} />
             <Text style={styles.placeAddress}>{place.address}</Text>
-          </View>
+          </TouchableOpacity>
 
           {place.week_hours.length > 0 && (
-            <View style={styles.hoursSection}>
-              <Text style={styles.sectionTitle}>Hours</Text>
-              {place.week_hours.map((hours, index) => (
-                <Text key={index} style={styles.hoursText}>{hours}</Text>
-              ))}
-            </View>
+            <WorkingHoursSection hours={place.week_hours} />
           )}
         </View>
 
@@ -656,11 +872,135 @@ export default function PlaceDetailsScreen() {
               <Image 
                 source={{ uri: 'https://via.placeholder.com/32' }} 
                 style={{ width: 32, height: 32 }}
+                contentFit="cover"
+                cachePolicy="memory"
               />
               <Text style={styles.photoOptionText}>Choose from Library</Text>
             </TouchableOpacity>
           </View>
         </SafeAreaView>
+      </Modal>
+
+      {/* Save to Collection Modal */}
+      <Modal visible={showSaveModal} animationType="slide" presentationStyle="pageSheet">
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={() => setShowSaveModal(false)}>
+              <Text style={styles.modalCloseText}>Cancel</Text>
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>Save to Collection</Text>
+            <View />
+          </View>
+
+          <View style={styles.collectionsContainer}>
+            <FlatList
+              data={userCollections}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.collectionItem}
+                  onPress={() => handleSaveToCollection(item.id)}
+                >
+                  <View style={styles.collectionInfo}>
+                    <Text style={styles.collectionName}>{item.name}</Text>
+                    <Text style={styles.collectionCount}>{item.place_count} places</Text>
+                  </View>
+                  <Text style={styles.collectionArrow}>›</Text>
+                </TouchableOpacity>
+              )}
+              ListEmptyComponent={
+                <View style={styles.emptyCollections}>
+                  <Text style={styles.emptyText}>No collections found</Text>
+                  <Text style={styles.emptySubtext}>Create a collection first to save places</Text>
+                </View>
+              }
+            />
+          </View>
+        </SafeAreaView>
+      </Modal>
+
+      {/* Enhanced Image Viewer Modal */}
+      <Modal visible={showImageViewer} animationType="fade" presentationStyle="fullScreen">
+        <View style={styles.imageViewerContainer}>
+          {/* Close Button and Header */}
+          <SafeAreaView style={styles.imageViewerHeader}>
+            <TouchableOpacity 
+              style={styles.imageViewerCloseButton}
+              onPress={() => setShowImageViewer(false)}
+            >
+              <View style={styles.closeButtonContainer}>
+                <Text style={styles.imageViewerCloseText}>×</Text>
+              </View>
+            </TouchableOpacity>
+          </SafeAreaView>
+          
+          {/* Swipe-to-dismiss container */}
+          <View
+            style={styles.imageViewerContent}
+            {...PanResponder.create({
+              onMoveShouldSetPanResponder: (evt, gestureState) => {
+                return Math.abs(gestureState.dy) > Math.abs(gestureState.dx) && Math.abs(gestureState.dy) > 20;
+              },
+              onPanResponderRelease: (evt, gestureState) => {
+                // Close if swiped up or down significantly
+                if (Math.abs(gestureState.dy) > 100 && Math.abs(gestureState.vy) > 0.5) {
+                  setShowImageViewer(false);
+                }
+              },
+            }).panHandlers}
+          >
+            <ScrollView
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              contentOffset={{ x: selectedImageIndex * Dimensions.get('window').width, y: 0 }}
+              onMomentumScrollEnd={(event) => {
+                const newIndex = Math.round(event.nativeEvent.contentOffset.x / Dimensions.get('window').width);
+                setSelectedImageIndex(newIndex);
+              }}
+            >
+              {placePhotos.map((photo, index) => (
+                <ScrollView
+                  key={index}
+                  style={[styles.imageZoomContainerStyle, { width: Dimensions.get('window').width }]}
+                  contentContainerStyle={styles.imageZoomContainer}
+                  maximumZoomScale={3}
+                  minimumZoomScale={1}
+                  showsVerticalScrollIndicator={false}
+                  showsHorizontalScrollIndicator={false}
+                  centerContent
+                >
+                  <TouchableOpacity 
+                    activeOpacity={1}
+                    onPress={() => setShowImageViewer(false)}
+                    style={styles.imageContainer}
+                  >
+                    <Image
+                      source={{ uri: photo }}
+                      style={styles.fullSizeImage}
+                      contentFit="contain"
+                      transition={200}
+                      cachePolicy="memory-disk"
+                      priority="high"
+                    />
+                  </TouchableOpacity>
+                </ScrollView>
+              ))}
+            </ScrollView>
+          </View>
+          
+          {/* Footer with counter */}
+          <SafeAreaView style={styles.imageViewerFooter}>
+            <View style={styles.imageCounterContainer}>
+              <Text style={styles.imageCounterText}>
+                {selectedImageIndex + 1} of {placePhotos.length}
+              </Text>
+              <Text style={styles.swipeHintText}>
+                Swipe up/down or tap to close
+              </Text>
+            </View>
+          </SafeAreaView>
+        </View>
       </Modal>
     </SafeAreaView>
   );
@@ -731,11 +1071,14 @@ const styles = StyleSheet.create({
   photoGallery: {
     height: 250,
   },
+  photoTouchable: {
+    marginRight: 12,
+  },
   placePhoto: {
     width: 300,
     height: 250,
-    marginRight: 12,
-    borderRadius: 0,
+    borderRadius: 12,
+    backgroundColor: '#F2F2F7', // Prevents flash during loading
   },
   addPhotoButton: {
     position: 'absolute',
@@ -811,15 +1154,44 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: 8,
     marginBottom: 16,
+    backgroundColor: '#F9F9F9',
+    padding: 12,
+    borderRadius: 8,
   },
   placeAddress: {
     fontSize: 16,
-    color: '#000000',
+    color: '#007AFF',
     flex: 1,
     lineHeight: 22,
+    fontWeight: '500',
   },
   hoursSection: {
+    marginBottom: 8,
+  },
+  hoursDropdown: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F2F2F7',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+  },
+  hoursText: {
+    fontSize: 12,
+    color: '#3C3C43',
+  },
+  fullHours: {
+    backgroundColor: '#F9F9F9',
+    borderRadius: 12,
+    padding: 16,
     marginTop: 8,
+  },
+  dayHours: {
+    fontSize: 14,
+    color: '#3C3C43',
+    marginBottom: 4,
   },
   sectionTitle: {
     fontSize: 18,
@@ -1046,7 +1418,146 @@ const styles = StyleSheet.create({
   },
   photoOptionText: {
     fontSize: 16,
-    color: '#000000',
-    fontWeight: '500',
+    color: '#007AFF',
+    marginLeft: 12,
+  },
+  // Save to Collection Modal Styles
+  collectionsContainer: {
+    flex: 1,
+    paddingHorizontal: 16,
+  },
+  collectionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    marginVertical: 4,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  collectionInfo: {
+    flex: 1,
+  },
+  collectionName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1A1A1A',
+    marginBottom: 4,
+  },
+  collectionCount: {
+    fontSize: 14,
+    color: '#666666',
+  },
+  collectionArrow: {
+    fontSize: 20,
+    color: '#666666',
+    fontWeight: '300',
+  },
+  emptyCollections: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  emptyText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#666666',
+    marginBottom: 8,
+  },
+  emptySubtext: {
+    fontSize: 14,
+    color: '#999999',
+    textAlign: 'center',
+  },
+  // Image Viewer Modal Styles
+  imageViewerContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  imageViewerHeader: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 1,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+  },
+  imageViewerCloseButton: {
+    alignSelf: 'flex-end',
+  },
+  closeButtonContainer: {
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  imageViewerCloseText: {
+    fontSize: 28,
+    color: '#FFFFFF',
+    fontWeight: '300',
+    lineHeight: 28,
+  },
+  imageViewerContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageZoomContainerStyle: {
+    width: 400,
+    flex: 1,
+  },
+  imageZoomContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: '100%',
+  },
+  fullSizeImage: {
+    width: 400,
+    height: '100%',
+  },
+  imageViewerFooter: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+    paddingBottom: 8,
+    alignItems: 'center',
+  },
+  imageCounterContainer: {
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 16,
+    alignItems: 'center',
+  },
+  imageCounterText: {
+    fontSize: 16,
+    color: '#FFFFFF',
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  swipeHintText: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontWeight: '400',
   },
 });

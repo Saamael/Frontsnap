@@ -7,11 +7,14 @@ export async function POST(request: NextRequest) {
   // Get origin from request
   const origin = request.headers.get('origin');
   
-  // Define allowed origins (add your production domains)
+  // Define allowed origins for production
   const allowedOrigins = [
     'http://localhost:3000',
     'http://localhost:8081',
-    'https://your-production-domain.com', // Replace with your actual domain
+    'https://frontsnap.vercel.app', // Production domain
+    'https://frontsnap.app', // Custom domain
+    'exp://', // Expo development
+    'http://localhost:19006', // Expo web
   ];
   
   // Check if origin is allowed
@@ -37,10 +40,12 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  if (!OPENAI_API_KEY || OPENAI_API_KEY === 'your_openai_api_key') {
+  if (!OPENAI_API_KEY || OPENAI_API_KEY.trim() === '' || OPENAI_API_KEY === 'your_openai_api_key') {
+    console.error('❌ OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.');
     return new Response(JSON.stringify({ 
-      error: 'OpenAI API key not configured',
-      status: 'CONFIGURATION_ERROR'
+      error: 'OpenAI API key not configured. Please check your environment variables.',
+      status: 'CONFIGURATION_ERROR',
+      details: 'The OPENAI_API_KEY environment variable is missing or invalid.'
     }), {
       status: 500,
       headers: corsHeaders,
@@ -53,11 +58,13 @@ export async function POST(request: NextRequest) {
     
     if (type === 'analyze-storefront') {
       return await analyzeStorefront(params, corsHeaders);
+    } else if (type === 'quick-analysis') {
+      return await quickAnalysis(params, corsHeaders);
     } else if (type === 'generate-review') {
       return await generateReview(params, corsHeaders);
     } else {
       return new Response(JSON.stringify({ 
-        error: 'Invalid request type. Use: analyze-storefront or generate-review',
+        error: 'Invalid request type. Use: analyze-storefront, quick-analysis, or generate-review',
         status: 'INVALID_REQUEST'
       }), {
         status: 400,
@@ -104,21 +111,54 @@ async function analyzeStorefront(params: any, corsHeaders: any) {
             content: [
               {
                 type: 'text',
-                text: `Analyze this storefront image and identify the business. Look carefully for:
+                text: `Analyze this storefront image comprehensively to identify the business, focusing on VISUAL FEATURES even when text is not visible. Examine:
 
-1) Business type/category (be specific - e.g., "Spa", "Beauty Salon", "Hair Salon", "Nail Salon", "Massage Spa", "Restaurant", "Coffee Shop", "Gym", etc.)
-2) Business name - read ALL visible text on signs, windows, doors, and any text overlays in the image
-3) Any address or location text visible in the image
-4) Brief description of what you see
-5) Notable visual features that help identify the business type
+VISUAL ANALYSIS (Primary - for when no text is visible):
+1) Architectural features: storefront design, awnings, color schemes, window layouts, door styles
+2) Interior elements visible: furniture type (massage chairs, dining tables, salon chairs, gym equipment, retail displays)
+3) Equipment and fixtures: professional tools, machines, displays, lighting fixtures
+4) Layout patterns: seating arrangements, workspace organization, customer flow areas
+5) Contextual clues: outdoor seating, parking setup, building style, surrounding environment
+6) Visual symbols and logos: non-text branding, color patterns, design elements
 
-Pay special attention to:
-- Any Vietnamese text or signage (this image may be from Vietnam)
-- Spa/salon indicators: massage chairs, beauty equipment, salon chairs, spa signage
-- Restaurant indicators: food displays, dining areas, kitchen equipment
-- Text overlays that might show location information
+BUSINESS TYPE INDICATORS:
+- Spa/Massage: massage tables, relaxation chairs, soft lighting, wellness decor, plants, tranquil colors
+- Hair/Beauty Salon: salon chairs, mirrors, hair washing stations, beauty products displays, bright lighting
+- Restaurant/Cafe: dining tables, kitchen equipment, food displays, menu boards, beverage machines
+- Gym/Fitness: exercise equipment, mirrors, weights, mats, athletic flooring
+- Retail/Store: product displays, shelving, checkout counters, shopping baskets, price tags
+- Medical: clinical equipment, white/sterile environment, examination areas, medical signage
 
-Return ONLY a valid JSON object with fields: businessType, businessName, description, features (array), locationText (if any address/location text is visible). Do not include any markdown formatting or code blocks.`
+TEXT ANALYSIS (Secondary):
+7) Business name from signs, windows, doors, overlays
+8) Address or location text visible
+9) Vietnamese text or international signage
+10) Service descriptions or menu items
+
+SCORING CONFIDENCE:
+Rate your confidence (0-100) for:
+- Business type identification
+- Visual feature matching
+- Name recognition (if any)
+- Location context
+
+Return ONLY a valid JSON object with fields: 
+{
+  "businessType": "specific category",
+  "businessName": "name if visible or 'Unknown' if not",
+  "description": "detailed visual description",
+  "features": ["array of visual features observed"],
+  "visualIndicators": ["specific visual clues for business type"],
+  "confidence": {
+    "businessType": 0-100,
+    "visualFeatures": 0-100,
+    "nameRecognition": 0-100
+  },
+  "locationText": "address if visible",
+  "architecturalStyle": "building/storefront design characteristics"
+}
+
+Do not include markdown formatting or code blocks.`
               },
               {
                 type: 'image_url',
@@ -159,6 +199,13 @@ Return ONLY a valid JSON object with fields: businessType, businessName, descrip
         businessName: analysis.businessName || 'Unknown Business',
         description: analysis.description || 'Business storefront',
         features: Array.isArray(analysis.features) ? analysis.features : [],
+        visualIndicators: Array.isArray(analysis.visualIndicators) ? analysis.visualIndicators : [],
+        confidence: analysis.confidence || {
+          businessType: 50,
+          visualFeatures: 50,
+          nameRecognition: 0
+        },
+        architecturalStyle: analysis.architecturalStyle || 'Standard storefront',
         locationText: analysis.locationText || undefined,
         coordinates: location
       };
@@ -277,6 +324,131 @@ ${reviewTexts}`
           ? review.overallSentiment : 'neutral',
         popularTimes: review.popularTimes || 'Peak hours vary',
         bestFor: Array.isArray(review.bestFor) ? review.bestFor : ['General visits']
+      };
+      
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: corsHeaders,
+      });
+    } catch (parseError) {
+      return new Response(JSON.stringify({ 
+        error: 'Failed to parse AI response',
+        status: 'PARSE_ERROR'
+      }), {
+        status: 500,
+        headers: corsHeaders,
+      });
+    }
+  } catch (error) {
+    return new Response(JSON.stringify({ 
+      error: 'OpenAI API request failed',
+      status: 'API_ERROR'
+    }), {
+      status: 500,
+      headers: corsHeaders,
+    });
+  }
+}
+
+async function quickAnalysis(params: any, corsHeaders: any) {
+  const { imageUri } = params;
+  
+  if (!imageUri) {
+    return new Response(JSON.stringify({ 
+      error: 'Image URI is required',
+      status: 'INVALID_REQUEST'
+    }), {
+      status: 400,
+      headers: corsHeaders,
+    });
+  }
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini', // Use faster, cheaper model for quick analysis
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `QUICK BUSINESS TYPE IDENTIFICATION - Respond in under 2 seconds.
+
+Look at this image and identify the business type based on OBVIOUS visual cues only:
+
+BUSINESS TYPES TO IDENTIFY:
+- Restaurant (dining tables, food displays, kitchen visible)
+- Cafe/Coffee Shop (coffee machines, pastry displays, casual seating)
+- Spa/Massage (massage tables, relaxation chairs, wellness decor)
+- Beauty/Hair Salon (salon chairs, mirrors, hair equipment)
+- Gym/Fitness (exercise equipment, weights, mirrors)
+- Retail/Store (product displays, shelving, checkout counters)
+- Bar/Nightclub (bar counter, alcohol displays, dim lighting)
+- Medical/Clinic (clinical equipment, white/sterile environment)
+- Hotel/Lodging (reception desk, hotel furniture, lobby)
+- Other (if none of the above clearly match)
+
+CONFIDENCE SCORING:
+- 90-100: Extremely obvious (multiple clear indicators)
+- 70-89: Very clear (several good indicators)
+- 50-69: Moderately clear (some indicators)
+- 30-49: Somewhat unclear (few indicators)
+- 0-29: Very unclear (no clear indicators)
+
+Return ONLY a JSON object:
+{
+  "businessType": "specific type from list above",
+  "confidence": 0-100,
+  "visualCues": ["list", "of", "obvious", "visual", "elements", "seen"]
+}
+
+NO markdown, no explanation, just the JSON.`
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: imageUri
+                }
+              }
+            ]
+          }
+        ],
+        max_tokens: 200, // Keep response short
+        temperature: 0.1 // Low temperature for consistency
+      })
+    });
+
+    const data = await response.json();
+    
+    if (!data.choices || !data.choices[0]) {
+      return new Response(JSON.stringify({ 
+        error: 'Invalid OpenAI response',
+        status: 'API_ERROR'
+      }), {
+        status: 500,
+        headers: corsHeaders,
+      });
+    }
+    
+    try {
+      let responseContent = data.choices[0].message.content.trim();
+      responseContent = responseContent.replace(/^```json\s*/gm, '');
+      responseContent = responseContent.replace(/^```\s*/gm, '');
+      responseContent = responseContent.replace(/```$/gm, '');
+      responseContent = responseContent.trim();
+      
+      const analysis = JSON.parse(responseContent);
+      
+      const result = {
+        businessType: analysis.businessType || 'Other',
+        confidence: Math.max(0, Math.min(100, analysis.confidence || 0)),
+        visualCues: Array.isArray(analysis.visualCues) ? analysis.visualCues : []
       };
       
       return new Response(JSON.stringify(result), {

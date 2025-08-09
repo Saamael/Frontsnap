@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -13,60 +13,144 @@ import {
 import { useRouter } from 'expo-router';
 import { ArrowLeft, Gem, Camera, MapPin, Trophy, Clock, Users, Star } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { getCurrentUser, getHiddenGemByCity, HiddenGem } from '@/lib/supabase';
+import { getCurrentUser, getHiddenGemByCity, getActiveHiddenGemsByCity, getDiscoveredHiddenGemsByCity, HiddenGem } from '@/lib/supabase';
+import { useLocation } from '@/contexts/LocationContext';
+import { useRealtimeHiddenGems } from '@/hooks/useRealtimeHiddenGems';
+import { useToast } from '@/hooks/useToast';
+import { Toast } from '@/components/Toast';
+import { useSmartRefresh } from '@/hooks/useSmartRefresh';
 
 export default function HiddenGemScreen() {
   const [hiddenGem, setHiddenGem] = useState<HiddenGem | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [currentCity] = useState('San Francisco'); // You could get this from location services
   const router = useRouter();
-  const mounted = useRef(true);
+  const { toast, showSuccess, showError, hideToast } = useToast();
+  
+  // Get location from context
+  const { locationData, currentLocation, locationKey, isLoading: isLocationLoading } = useLocation();
+  const currentCity = locationData?.city || 'San Francisco';
 
+  // Real-time handlers for live hidden gem updates
+  const handleNewHiddenGem = useCallback((newGem: HiddenGem) => {
+    console.log('🔄 Real-time: New hidden gem added:', newGem.title);
+    if (newGem.is_active) {
+      setHiddenGem(newGem);
+      showSuccess('New Hidden Gem!', `${newGem.title} just appeared in ${currentCity}!`);
+    }
+  }, [currentCity, showSuccess]);
+
+  const handleUpdatedHiddenGem = useCallback((updatedGem: HiddenGem) => {
+    console.log('🔄 Real-time: Hidden gem updated:', updatedGem.title);
+    setHiddenGem(prev => prev?.id === updatedGem.id ? updatedGem : prev);
+  }, []);
+
+  const handleDiscoveredHiddenGem = useCallback((discoveredGem: HiddenGem) => {
+    console.log('🔄 Real-time: Hidden gem discovered:', discoveredGem.title);
+    if (hiddenGem?.id === discoveredGem.id) {
+      showSuccess('Gem Discovered!', `${discoveredGem.title} was just discovered by someone!`);
+      // Reload to show the next active gem or discovered status
+      loadHiddenGem();
+    }
+  }, [hiddenGem, loadHiddenGem, showSuccess]);
+
+  // Enable real-time subscriptions
+  useRealtimeHiddenGems({
+    currentCity,
+    onHiddenGemAdded: handleNewHiddenGem,
+    onHiddenGemUpdated: handleUpdatedHiddenGem,
+    onHiddenGemDiscovered: handleDiscoveredHiddenGem
+  });
+
+  // Smart refresh for background updates and app state changes
+  const refreshHiddenGemData = useCallback(async () => {
+    if (currentCity && isAuthenticated) {
+      console.log('🔄 Smart refresh: Refreshing hidden gem data');
+      await loadHiddenGem();
+    }
+  }, [currentCity, isAuthenticated, loadHiddenGem]);
+
+  useSmartRefresh({
+    refreshFunction: refreshHiddenGemData,
+    intervalMs: 45000, // Refresh every 45 seconds (less frequent than places)
+    onlyWhenActive: true,
+    enabled: isAuthenticated && !!currentCity
+  });
+
+  // Load hidden gem when location changes or component mounts
   useEffect(() => {
-    mounted.current = true;
+    if (isAuthenticated && currentCity && !isLocationLoading) {
+      console.log(`🎯 Location changed or component mounted - loading gems for: ${currentCity}`);
+      loadHiddenGem();
+    }
+  }, [currentCity, isAuthenticated, locationKey, isLocationLoading, loadHiddenGem]);
+
+  // Check authentication on mount
+  useEffect(() => {
     checkAuthAndLoadHiddenGem();
-    
-    return () => {
-      mounted.current = false;
-    };
   }, []);
 
   const checkAuthAndLoadHiddenGem = async () => {
     try {
       const user = await getCurrentUser();
       if (!user) {
-        console.log('🚫 User not authenticated in hidden gem page, redirecting to auth');
+        console.log('🚫 User not authenticated, redirecting to login');
         router.replace('/auth/login');
         return;
       }
       
-      if (mounted.current) {
-        setIsAuthenticated(true);
-        await loadHiddenGem();
-      }
+      setIsAuthenticated(true);
+      // Hidden gem will be loaded by the other useEffect
     } catch (error) {
       console.error('Error checking authentication:', error);
       router.replace('/auth/login');
     }
   };
 
-  const loadHiddenGem = async () => {
+  const loadHiddenGem = useCallback(async () => {
+    if (!currentCity) {
+      console.log('🚫 No city available to load hidden gems');
+      setHiddenGem(null);
+      setIsLoading(false);
+      return;
+    }
+
     try {
       setIsLoading(true);
-      const gem = await getHiddenGemByCity(currentCity);
+      console.log(`🎯 Loading hidden gems for city: ${currentCity} (locationKey: ${locationKey})`);
       
-      if (mounted.current) {
-        setHiddenGem(gem);
+      // Add small delay to ensure context has updated
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // First try to get active hidden gems
+      const activeGems = await getActiveHiddenGemsByCity(currentCity);
+      console.log(`✨ Found ${activeGems.length} active gems in ${currentCity}`);
+      
+      if (activeGems.length > 0) {
+        // Show the first active gem
+        console.log(`🎮 Showing active gem: ${activeGems[0].title}`);
+        setHiddenGem(activeGems[0]);
+      } else {
+        // If no active gems, show the most recently discovered gem
+        console.log(`🔍 No active gems, checking discovered gems in ${currentCity}`);
+        const discoveredGems = await getDiscoveredHiddenGemsByCity(currentCity);
+        console.log(`🏆 Found ${discoveredGems.length} discovered gems in ${currentCity}`);
+        
+        if (discoveredGems.length > 0) {
+          console.log(`🎯 Showing discovered gem: ${discoveredGems[0].title}`);
+          setHiddenGem(discoveredGems[0]);
+        } else {
+          console.log(`❌ No gems found in ${currentCity}`);
+          setHiddenGem(null);
+        }
       }
     } catch (error) {
-      console.error('Error loading hidden gem:', error);
+      console.error('❌ Error loading hidden gem:', error);
+      setHiddenGem(null);
     } finally {
-      if (mounted.current) {
-        setIsLoading(false);
-      }
+      setIsLoading(false);
     }
-  };
+  }, [currentCity, locationKey]);
 
   const handleBack = () => {
     router.back();
@@ -77,26 +161,26 @@ export default function HiddenGemScreen() {
     router.push('/(tabs)/capture');
   };
 
-  if (isLoading) {
+  if (isLocationLoading || isLoading) {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#FFD700" />
-          <Text style={styles.loadingText}>Loading hidden gem...</Text>
+          <ActivityIndicator size="large" color="#0000ff" />
+          <Text style={styles.loadingText}>Loading hidden gems for {currentCity}...</Text>
         </View>
       </SafeAreaView>
     );
   }
 
   if (!hiddenGem) {
-  return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={handleBack}>
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.backButton} onPress={handleBack}>
             <ArrowLeft size={24} color="#2C2C2E" strokeWidth={2} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Hidden Gem</Text>
-      </View>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Hidden Gem</Text>
+        </View>
 
         <View style={styles.emptyState}>
           <Gem size={64} color="#C7C7CC" strokeWidth={1.5} />
@@ -116,10 +200,10 @@ export default function HiddenGemScreen() {
         <View style={styles.heroSection}>
           <Image source={{ uri: hiddenGem.hint_image_url }} style={styles.heroImage} />
           
-        <LinearGradient
+          <LinearGradient
             colors={['transparent', 'rgba(0,0,0,0.8)']}
             style={styles.heroOverlay}
-        >
+          >
             <TouchableOpacity style={styles.backButton} onPress={handleBack}>
               <ArrowLeft size={24} color="#FFFFFF" strokeWidth={2} />
             </TouchableOpacity>
@@ -128,12 +212,22 @@ export default function HiddenGemScreen() {
               <View style={styles.locationBadge}>
                 <MapPin size={16} color="#FFFFFF" strokeWidth={2} />
                 <Text style={styles.locationText}>{hiddenGem.city}, {hiddenGem.country}</Text>
-          </View>
-          
+              </View>
+              
+              {/* Winner Banner */}
+              {!hiddenGem.is_active && hiddenGem.winner_id && (
+                <View style={styles.winnerBanner}>
+                  <Trophy size={16} color="#FFD700" strokeWidth={2} />
+                  <Text style={styles.winnerText}>
+                    Hidden gem found by @{(hiddenGem as any).winner_profile?.full_name || 'Winner'} - Prize: {hiddenGem.reward}
+                  </Text>
+                </View>
+              )}
+              
               <Text style={styles.heroTitle}>{hiddenGem.title}</Text>
               <Text style={styles.heroDescription}>{hiddenGem.description}</Text>
-          </View>
-        </LinearGradient>
+            </View>
+          </LinearGradient>
         </View>
 
         {/* Stats Section */}
@@ -175,17 +269,17 @@ export default function HiddenGemScreen() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Star size={24} color="#007AFF" strokeWidth={2} />
-          <Text style={styles.sectionTitle}>Clues</Text>
+            <Text style={styles.sectionTitle}>Clues</Text>
           </View>
           <View style={styles.cluesContainer}>
             {hiddenGem.clues.map((clue, index) => (
-            <View key={index} style={styles.clueItem}>
-              <View style={styles.clueNumber}>
-                <Text style={styles.clueNumberText}>{index + 1}</Text>
+              <View key={index} style={styles.clueItem}>
+                <View style={styles.clueNumber}>
+                  <Text style={styles.clueNumberText}>{index + 1}</Text>
+                </View>
+                <Text style={styles.clueText}>{clue}</Text>
               </View>
-              <Text style={styles.clueText}>{clue}</Text>
-            </View>
-          ))}
+            ))}
           </View>
         </View>
 
@@ -195,23 +289,36 @@ export default function HiddenGemScreen() {
           <View style={styles.rulesContainer}>
             {hiddenGem.rules.map((rule, index) => (
               <Text key={index} style={styles.ruleText}>• {rule}</Text>
-              ))}
-            </View>
+            ))}
+          </View>
         </View>
 
         {/* Action Button */}
         <View style={styles.actionSection}>
-          <TouchableOpacity style={styles.captureButton} onPress={handleCapturePhoto}>
-            <LinearGradient
-              colors={['#FFD700', '#FFA500']}
-              style={styles.captureButtonGradient}
-            >
-            <Camera size={24} color="#FFFFFF" strokeWidth={2} />
-              <Text style={styles.captureButtonText}>Start Your Hunt</Text>
-            </LinearGradient>
-          </TouchableOpacity>
+          {hiddenGem.is_active ? (
+            <TouchableOpacity style={styles.captureButton} onPress={handleCapturePhoto}>
+              <LinearGradient
+                colors={['#FFD700', '#FFA500']}
+                style={styles.captureButtonGradient}
+              >
+                <Camera size={24} color="#FFFFFF" strokeWidth={2} />
+                <Text style={styles.captureButtonText}>Start Your Hunt</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.discoveredButton} disabled>
+              <LinearGradient
+                colors={['#8E8E93', '#6D6D70']}
+                style={styles.captureButtonGradient}
+              >
+                <Trophy size={24} color="#FFFFFF" strokeWidth={2} />
+                <Text style={styles.captureButtonText}>Already Discovered</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          )}
         </View>
       </ScrollView>
+      {toast && <Toast {...toast} onHide={hideToast} />}
     </SafeAreaView>
   );
 }
@@ -410,6 +517,17 @@ const styles = StyleSheet.create({
     gap: 12,
     marginBottom: 16,
   },
+  discoveredButton: {
+    backgroundColor: '#8E8E93',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    borderRadius: 12,
+    gap: 12,
+    marginBottom: 16,
+    opacity: 0.7,
+  },
   captureButtonGradient: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -426,12 +544,12 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 20,
   },
   loadingText: {
+    marginTop: 10,
     fontSize: 16,
-    color: '#2C2C2E',
-    fontWeight: '600',
-    marginTop: 16,
+    color: '#666',
   },
   emptyState: {
     flex: 1,
@@ -450,5 +568,21 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
     textAlign: 'center',
     lineHeight: 24,
+  },
+  winnerBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 215, 0, 0.2)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginBottom: 16,
+  },
+  winnerText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+    flex: 1,
+    marginLeft: 8,
   },
 });

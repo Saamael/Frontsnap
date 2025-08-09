@@ -12,6 +12,7 @@ import {
 import { useRouter } from 'expo-router';
 import { 
   User, 
+  Users,
   Settings, 
   Camera, 
   Heart, 
@@ -35,6 +36,13 @@ import {
   getUserReviewsCount,
   Profile 
 } from '@/lib/supabase';
+import { useSocialConnections } from '@/hooks/useSocialConnections';
+import { HapticFeedback } from '@/utils/haptics';
+import { useToast } from '@/hooks/useToast';
+import { Toast } from '@/components/Toast';
+import { Loading } from '@/components/Loading';
+import { SimpleAvatar } from '@/components/SimpleAvatar';
+import { Colors, Typography, Spacing } from '@/constants/theme';
 
 interface UserStats {
   placesScanned: number;
@@ -59,9 +67,30 @@ const menuSections = [
     ],
   },
   {
-    title: 'App',
+    title: 'Social Features',
+    items: [
+      { id: 'activity-dashboard', title: 'Activity Dashboard', icon: Users, color: '#007AFF' },
+      { id: 'nearby-friends', title: 'Nearby Friends', icon: MapPin, color: '#34C759' },
+      { id: 'location-settings', title: 'Location Settings', icon: Shield, color: '#FF9500' },
+    ],
+  },
+  {
+    title: 'Achievements',
     items: [
       { id: 'achievements', title: 'Achievements', icon: Trophy, color: '#FFD700' },
+    ],
+  },
+  {
+    title: 'Admin',
+    items: [
+      { id: 'admin-dashboard', title: 'Admin Dashboard', icon: Shield, color: '#FF3B30' },
+      { id: 'admin-hidden-gems', title: 'Manage Hidden Gems', icon: Award, color: '#AF52DE' },
+      { id: 'admin-performance', title: 'Performance Monitor', icon: Trophy, color: '#34C759' },
+    ],
+  },
+  {
+    title: 'App',
+    items: [
       { id: 'settings', title: 'App Settings', icon: Settings, color: '#8E8E93' },
       { id: 'help', title: 'Help & Support', icon: HelpCircle, color: '#007AFF' },
       { id: 'about', title: 'About FrontSnap', icon: Info, color: '#5856D6' },
@@ -72,6 +101,7 @@ const menuSections = [
 export default function ProfileScreen() {
   const router = useRouter();
   const [userProfile, setUserProfile] = useState<Profile | null>(null);
+  const { connectionsCount } = useSocialConnections();
   const [userStats, setUserStats] = useState<UserStats>({
     placesScanned: 0,
     collectionsSaved: 0,
@@ -85,6 +115,7 @@ export default function ProfileScreen() {
   });
   const [isLoading, setIsLoading] = useState(true);
   const mounted = useRef(true);
+  const { toast, showSuccess, showError, showInfo, hideToast } = useToast();
 
   useEffect(() => {
     mounted.current = true;
@@ -133,6 +164,7 @@ export default function ProfileScreen() {
       }
     } catch (error) {
       console.error('Error loading user data:', error);
+      showError('Profile Error', 'Failed to load profile data');
     } finally {
       if (mounted.current) {
         setIsLoading(false);
@@ -164,31 +196,52 @@ export default function ProfileScreen() {
   };
 
   const handleBack = () => {
+    HapticFeedback.light();
     router.back();
   };
 
   const handleMenuPress = (itemId: string) => {
+    HapticFeedback.light();
+    
     switch (itemId) {
       case 'profile':
-        Alert.alert('Edit Profile', 'Profile editing would open here');
+        router.push('/profile/edit');
         break;
       case 'privacy':
-        Alert.alert('Privacy & Security', 'Privacy settings would open here');
+        showInfo('Coming Soon', 'Privacy settings will be available soon');
+        break;
+      case 'admin-dashboard':
+        router.push('/admin');
+        break;
+      case 'admin-hidden-gems':
+        router.push('/admin/hidden-gems');
+        break;
+      case 'admin-performance':
+        router.push('/admin/performance');
+        break;
+      case 'activity-dashboard':
+        router.push('/profile/activity-dashboard');
+        break;
+      case 'nearby-friends':
+        router.push('/profile/nearby-friends');
+        break;
+      case 'location-settings':
+        router.push('/profile/location-settings');
         break;
       case 'notifications':
-        Alert.alert('Notifications', 'Notification settings would open here');
+        showInfo('Coming Soon', 'Notification settings will be available soon');
         break;
       case 'achievements':
-        Alert.alert('Achievements', 'Coming soon: Compete with other FrontSnappers!');
+        showInfo('Coming Soon', 'Compete with other FrontSnappers! Feature coming soon');
         break;
       case 'settings':
-        Alert.alert('App Settings', 'App settings would open here');
+        router.push('/profile/app-settings');
         break;
       case 'help':
-        Alert.alert('Help & Support', 'Help center would open here');
+        showInfo('Coming Soon', 'Help center will be available soon');
         break;
       case 'about':
-        Alert.alert('About FrontSnap', 'About page would open here');
+        router.push('/profile/about');
         break;
       default:
         break;
@@ -196,6 +249,8 @@ export default function ProfileScreen() {
   };
 
   const handleSignOut = async () => {
+    HapticFeedback.medium();
+    
     Alert.alert(
       'Sign Out',
       'Are you sure you want to sign out?',
@@ -206,11 +261,13 @@ export default function ProfileScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
+              HapticFeedback.success();
               await signOut();
+              showSuccess('Signed Out', 'See you next time!');
               router.replace('/auth/login');
             } catch (error) {
               console.error('Error signing out:', error);
-              Alert.alert('Error', 'Failed to sign out. Please try again.');
+              showError('Sign Out Failed', 'Please try again');
             }
           },
         },
@@ -219,7 +276,13 @@ export default function ProfileScreen() {
   };
 
   const handleRefresh = async () => {
-    await loadUserData();
+    HapticFeedback.light();
+    try {
+      await loadUserData();
+      showSuccess('Refreshed', 'Profile updated successfully');
+    } catch (error) {
+      showError('Refresh Failed', 'Unable to refresh profile');
+    }
   };
 
   const StatCard = ({ icon: Icon, value, label, color }: {
@@ -228,7 +291,11 @@ export default function ProfileScreen() {
     label: string;
     color: string;
   }) => (
-    <View style={styles.statCard}>
+    <View 
+      style={styles.statCard}
+      accessibilityLabel={`${label}: ${value}`}
+      accessibilityRole="summary"
+    >
       <View style={[styles.statIcon, { backgroundColor: color + '20' }]}>
         <Icon size={20} color={color} strokeWidth={2} />
       </View>
@@ -238,7 +305,13 @@ export default function ProfileScreen() {
   );
 
   const MenuItem = ({ item }: { item: typeof menuSections[0]['items'][0] }) => (
-    <TouchableOpacity style={styles.menuItem} onPress={() => handleMenuPress(item.id)}>
+    <TouchableOpacity 
+      style={styles.menuItem} 
+      onPress={() => handleMenuPress(item.id)}
+      accessibilityLabel={item.title}
+      accessibilityRole="button"
+      accessibilityHint={`Open ${item.title.toLowerCase()} settings`}
+    >
       <View style={styles.menuItemLeft}>
         <View style={[styles.menuItemIcon, { backgroundColor: item.color + '20' }]}>
           <item.icon size={20} color={item.color} strokeWidth={2} />
@@ -252,9 +325,11 @@ export default function ProfileScreen() {
   if (isLoading || !userProfile) {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading profile...</Text>
-        </View>
+        <Loading 
+          fullScreen 
+          message="Loading profile..." 
+          accessibilityLabel="Loading profile data"
+        />
       </SafeAreaView>
     );
   }
@@ -263,11 +338,23 @@ export default function ProfileScreen() {
     <SafeAreaView style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={handleBack}>
+        <TouchableOpacity 
+          style={styles.backButton} 
+          onPress={handleBack}
+          accessibilityLabel="Go back"
+          accessibilityRole="button"
+          accessibilityHint="Return to previous screen"
+        >
           <Text style={styles.backButtonText}>← Back</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Profile</Text>
-        <TouchableOpacity style={styles.refreshButton} onPress={handleRefresh}>
+        <TouchableOpacity 
+          style={styles.refreshButton} 
+          onPress={handleRefresh}
+          accessibilityLabel="Refresh profile"
+          accessibilityRole="button"
+          accessibilityHint="Reload profile data"
+        >
           <Text style={styles.refreshButtonText}>Refresh</Text>
         </TouchableOpacity>
       </View>
@@ -276,20 +363,81 @@ export default function ProfileScreen() {
         {/* User Info */}
         <View style={styles.userSection}>
           <View style={styles.userInfo}>
-            <Image 
-              source={{ 
-                uri: userProfile.avatar_url || 'https://images.pexels.com/photos/220453/pexels-photo-220453.jpeg?auto=compress&cs=tinysrgb&w=200' 
-              }} 
-              style={styles.avatar} 
+            <SimpleAvatar
+              name={userProfile.full_name}
+              avatarUrl={userProfile.avatar_url}
+              size={80}
+              style={styles.avatar}
             />
             <View style={styles.userDetails}>
               <Text style={styles.userName}>{userProfile.full_name}</Text>
               <Text style={styles.userEmail}>{userProfile.email}</Text>
+              {userProfile.username && (
+                <Text style={styles.userUsername}>@{userProfile.username}</Text>
+              )}
             </View>
           </View>
 
+          {/* Social Features Opt-in */}
+          {!userProfile.allow_social_features && (
+            <TouchableOpacity 
+              style={styles.socialOptInCard}
+              onPress={() => router.push('/profile/social-setup')}
+              accessibilityLabel="Enable social features"
+              accessibilityRole="button"
+              accessibilityHint="Set up social features to connect with friends"
+            >
+              <View style={styles.socialOptInContent}>
+                <Text style={styles.socialOptInTitle}>🌟 Enable Social Features</Text>
+                <Text style={styles.socialOptInDescription}>
+                  Connect with friends, share discoveries, and get trusted recommendations
+                </Text>
+                <Text style={styles.socialOptInAction}>Tap to set up →</Text>
+              </View>
+            </TouchableOpacity>
+          )}
+
+          {/* Social Stats (if enabled) */}
+          {userProfile.allow_social_features && (
+            <View style={styles.socialStatsCard}>
+              <Text style={styles.socialStatsTitle}>Social</Text>
+              <View style={styles.socialStatsRow}>
+                <TouchableOpacity 
+                  style={styles.socialStat}
+                  onPress={() => router.push('/profile/connections')}
+                  accessibilityLabel="View connections"
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.socialStatNumber}>{connectionsCount.following_count}</Text>
+                  <Text style={styles.socialStatLabel}>Following</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={styles.socialStat}
+                  onPress={() => router.push('/profile/connections')}
+                  accessibilityLabel="View connections"
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.socialStatNumber}>{connectionsCount.followers_count}</Text>
+                  <Text style={styles.socialStatLabel}>Followers</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={styles.socialStat}
+                  onPress={() => router.push('/profile/find-friends')}
+                  accessibilityLabel="Find friends"
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.socialStatLabel}>Find Friends</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
           {/* Achievement Level */}
-          <View style={styles.achievementCard}>
+          <View 
+            style={styles.achievementCard}
+            accessibilityLabel={`Achievement level: ${userAchievements.level}, ${userAchievements.points} points`}
+            accessibilityRole="summary"
+          >
             <View style={styles.achievementHeader}>
               <Award size={20} color="#FFD700" strokeWidth={2} />
               <Text style={styles.achievementLevel}>{userAchievements.level}</Text>
@@ -340,7 +488,13 @@ export default function ProfileScreen() {
 
         {/* Menu Sections */}
         <View style={styles.menuContainer}>
-          {menuSections.map((section, sectionIndex) => (
+          {menuSections.filter(section => {
+            // Hide Admin section for non-admin users
+            if (section.title === 'Admin' && userProfile?.role !== 'admin') {
+              return false;
+            }
+            return true;
+          }).map((section, sectionIndex) => (
             <View key={section.title} style={styles.menuSection}>
               <Text style={styles.sectionTitle}>{section.title}</Text>
               <View style={styles.menuItems}>
@@ -355,7 +509,13 @@ export default function ProfileScreen() {
           ))}
 
           {/* Sign Out */}
-          <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
+          <TouchableOpacity 
+            style={styles.signOutButton} 
+            onPress={handleSignOut}
+            accessibilityLabel="Sign out of account"
+            accessibilityRole="button"
+            accessibilityHint="Sign out and return to login screen"
+          >
             <View style={styles.signOutIcon}>
               <LogOut size={20} color="#FF3B30" strokeWidth={2} />
             </View>
@@ -370,6 +530,15 @@ export default function ProfileScreen() {
           <Text style={styles.version}>Version 1.0.0</Text>
         </View>
       </ScrollView>
+      
+      <Toast
+        visible={toast.visible}
+        type={toast.type}
+        title={toast.title}
+        message={toast.message}
+        duration={toast.duration}
+        onHide={hideToast}
+      />
     </SafeAreaView>
   );
 }
@@ -379,26 +548,17 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#FFFFFF',
   },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  loadingText: {
-    fontSize: 16,
-    color: '#8E8E93',
-  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.base,
     borderBottomWidth: 0.5,
     borderBottomColor: '#E5E5EA',
   },
   backButton: {
-    paddingVertical: 8,
+    paddingVertical: Spacing.sm,
   },
   backButtonText: {
     fontSize: 16,
@@ -411,7 +571,7 @@ const styles = StyleSheet.create({
     color: '#2C2C2E',
   },
   refreshButton: {
-    paddingVertical: 8,
+    paddingVertical: Spacing.sm,
   },
   refreshButtonText: {
     fontSize: 16,
@@ -422,43 +582,41 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   userSection: {
-    padding: 20,
+    padding: Spacing.lg,
   },
   userInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: Spacing.xl,
   },
   avatar: {
     width: 80,
     height: 80,
     borderRadius: 40,
-    marginRight: 16,
+    marginRight: Spacing.base,
   },
   userDetails: {
     flex: 1,
   },
   userName: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#2C2C2E',
-    marginBottom: 4,
+    ...Typography.styles.h4,
+    marginBottom: Spacing.xs,
   },
   userEmail: {
-    fontSize: 16,
-    color: '#8E8E93',
+    ...Typography.styles.body1,
+    color: Colors.textSecondary,
   },
   achievementCard: {
     backgroundColor: '#F2F2F7',
     borderRadius: 16,
-    padding: 20,
-    marginBottom: 24,
+    padding: Spacing.lg,
+    marginBottom: Spacing.xl,
   },
   achievementHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
-    gap: 8,
+    marginBottom: Spacing.md,
+    gap: Spacing.sm,
   },
   achievementLevel: {
     fontSize: 18,
@@ -475,7 +633,7 @@ const styles = StyleSheet.create({
     height: 8,
     backgroundColor: '#E5E5EA',
     borderRadius: 4,
-    marginBottom: 8,
+    marginBottom: Spacing.sm,
   },
   progressFill: {
     height: '100%',
@@ -489,13 +647,13 @@ const styles = StyleSheet.create({
   },
   statsContainer: {
     flexDirection: 'row',
-    gap: 12,
+    gap: Spacing.md,
   },
   statCard: {
     flex: 1,
     backgroundColor: '#F2F2F7',
     borderRadius: 12,
-    padding: 16,
+    padding: Spacing.base,
     alignItems: 'center',
   },
   statIcon: {
@@ -504,13 +662,13 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: Spacing.sm,
   },
   statValue: {
     fontSize: 20,
     fontWeight: '700',
     color: '#2C2C2E',
-    marginBottom: 4,
+    marginBottom: Spacing.xs,
   },
   statLabel: {
     fontSize: 12,
@@ -518,16 +676,14 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   menuContainer: {
-    paddingHorizontal: 20,
+    paddingHorizontal: Spacing.lg,
   },
   menuSection: {
-    marginBottom: 32,
+    marginBottom: Spacing['2xl'],
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#2C2C2E',
-    marginBottom: 16,
+    ...Typography.styles.h5,
+    marginBottom: Spacing.base,
   },
   menuItems: {
     backgroundColor: '#F2F2F7',
@@ -538,13 +694,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 16,
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.base,
   },
   menuItemLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: Spacing.md,
   },
   menuItemIcon: {
     width: 32,
@@ -568,10 +724,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#F2F2F7',
     borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-    gap: 12,
-    marginBottom: 32,
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.base,
+    gap: Spacing.md,
+    marginBottom: Spacing['2xl'],
   },
   signOutIcon: {
     width: 32,
@@ -594,15 +750,78 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     color: '#2C2C2E',
-    marginBottom: 4,
+    marginBottom: Spacing.xs,
   },
   footerSubtext: {
     fontSize: 14,
     color: '#8E8E93',
-    marginBottom: 8,
+    marginBottom: Spacing.sm,
   },
   version: {
     fontSize: 12,
     color: '#C7C7CC',
+  },
+  // Social styles (added in Phase 1)
+  userUsername: {
+    fontSize: 14,
+    color: '#007AFF',
+    fontWeight: '500',
+  },
+  socialOptInCard: {
+    backgroundColor: '#007AFF10',
+    borderRadius: 12,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#007AFF30',
+  },
+  socialOptInContent: {
+    padding: Spacing.base,
+  },
+  socialOptInTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#007AFF',
+    marginBottom: 6,
+  },
+  socialOptInDescription: {
+    fontSize: 14,
+    color: '#2C2C2E',
+    lineHeight: 20,
+    marginBottom: Spacing.sm,
+  },
+  socialOptInAction: {
+    fontSize: 14,
+    color: '#007AFF',
+    fontWeight: '500',
+  },
+  socialStatsCard: {
+    backgroundColor: '#F2F2F7',
+    borderRadius: 12,
+    padding: Spacing.base,
+    marginTop: Spacing.base,
+    marginBottom: Spacing.xl,
+  },
+  socialStatsTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#2C2C2E',
+    marginBottom: Spacing.md,
+  },
+  socialStatsRow: {
+    flexDirection: 'row',
+    gap: Spacing.xl,
+  },
+  socialStat: {
+    alignItems: 'center',
+  },
+  socialStatNumber: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#2C2C2E',
+  },
+  socialStatLabel: {
+    fontSize: 12,
+    color: '#8E8E93',
+    marginTop: 2,
   },
 });

@@ -1,11 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   SafeAreaView,
   TouchableOpacity,
-  Image,
   Alert,
   ScrollView,
   TextInput,
@@ -14,14 +13,18 @@ import {
   Linking,
   Platform,
 } from 'react-native';
-import { Camera, Upload, MapPin, Star, Clock, Phone, ExternalLink, Copy, ChevronDown, ChevronUp, Plus, Share, Search, RotateCcw } from 'lucide-react-native';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import { Image } from 'expo-image';
+import { Upload, MapPin, Star, Clock, Phone, ExternalLink, Copy, ChevronDown, ChevronUp, Plus, Share, Search, RotateCcw, ArrowLeft, Camera as CameraIcon } from 'lucide-react-native';
+import { Camera as ExpoCamera, CameraView, CameraType, useCameraPermissions, FlashMode } from 'expo-camera';
+import { uploadImageAsync, ImageUploadResult } from '../../lib/supabase-storage';
+import { supabase } from '../../lib/supabase';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { analyzeStorefrontPhoto, generateReviewSummary } from '@/lib/openai';
 import { searchPlacesByText, searchNearbyPlaces, searchNearbyPlacesWithType, getPlaceDetails, convertGooglePlaceToPlace, reverseGeocode } from '@/lib/google-places';
-import { addPlace, getUserCollections, createCollection, addPlaceToCollection, getCurrentUser } from '@/lib/supabase';
+import { addPlace, getUserCollections, createCollection, addPlaceToCollection, getCurrentUser, checkHiddenGemDiscovery, markHiddenGemDiscovered, incrementHiddenGemStats, updateUserLocation, checkPlaceExists, addPlaceWithVisibility } from '@/lib/supabase';
 import { useRouter } from 'expo-router';
+import { useHaptics } from '@/hooks/useHaptics';
 
 interface AnalysisResult {
   businessName: string;
@@ -66,7 +69,8 @@ export default function CaptureScreen() {
   const [facing, setFacing] = useState<CameraType>('back');
   const [permission, requestPermission] = useCameraPermissions();
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [capturedImageThumbnail, setCapturedImageThumbnail] = useState<string | null>(null);
+  const [processingState, setProcessingState] = useState<'idle' | 'uploading' | 'analyzing' | 'complete'>('idle');
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [placeData, setPlaceData] = useState<PlaceData | null>(null);
   const [suggestedPlaces, setSuggestedPlaces] = useState<any[]>([]);
@@ -81,12 +85,26 @@ export default function CaptureScreen() {
   const [manualAddress, setManualAddress] = useState('');
   const [showAddressInput, setShowAddressInput] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [discoveredHiddenGem, setDiscoveredHiddenGem] = useState<any>(null);
+  const [showHiddenGemWinner, setShowHiddenGemWinner] = useState(false);
+  const [existingPlace, setExistingPlace] = useState<any>(null);
+  const [discoveryCount, setDiscoveryCount] = useState(0);
+  const [showDiscoveryBanner, setShowDiscoveryBanner] = useState(false);
+  const [photoLocation, setPhotoLocation] = useState<{latitude: number; longitude: number; direction?: number; accuracy?: number} | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<any[]>([]);
   const cameraRef = useRef<CameraView>(null);
   const router = useRouter();
   const mounted = useRef(true);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Haptic feedback
+  const haptics = useHaptics();
 
   useEffect(() => {
     mounted.current = true;
+    abortControllerRef.current = new AbortController();
     getCurrentLocationForSearch();
     
     // Auto-start camera if permissions are granted
@@ -96,6 +114,14 @@ export default function CaptureScreen() {
     
     return () => {
       mounted.current = false;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+      // Clear any pending async operations
+      setProcessingState('idle');
     };
   }, [permission]);
 
@@ -116,7 +142,45 @@ export default function CaptureScreen() {
     }
   };
 
-  const extractImageLocation = async (imageUri: string, imagePickerAsset?: any): Promise<{ latitude: number; longitude: number } | null> => {
+  const checkForHiddenGemDiscovery = async (latitude: number, longitude: number): Promise<any> => {
+    try {
+      console.log('🔍 Checking for hidden gem discovery at:', latitude, longitude);
+      
+      // Check if this location matches any active hidden gems
+      const hiddenGem = await checkHiddenGemDiscovery(latitude, longitude, 50); // 50 meter radius
+      
+      if (hiddenGem) {
+        console.log('🎯 HIDDEN GEM DISCOVERED!', hiddenGem.title);
+        
+        // Get current user
+        const user = await getCurrentUser();
+        if (!user) {
+          console.log('❌ No authenticated user for hidden gem discovery');
+          return null;
+        }
+
+        // Mark as discovered
+        const { data: updatedGem, error } = await markHiddenGemDiscovered(hiddenGem.id, user.id);
+        
+        if (error) {
+          console.error('❌ Error marking hidden gem as discovered:', error);
+          return null;
+        }
+
+        if (updatedGem) {
+          console.log('🏆 Hidden gem successfully claimed by user!');
+          return updatedGem;
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      console.error('❌ Error checking for hidden gem discovery:', error);
+      return null;
+    }
+  };
+
+  const extractImageLocation = async (imageUri: string, imagePickerAsset?: any): Promise<{ latitude: number; longitude: number; direction?: number; accuracy?: number } | null> => {
     try {
       console.log('🔍 Attempting to extract GPS data from image...');
       console.log('📱 Platform:', Platform.OS);
@@ -125,35 +189,94 @@ export default function CaptureScreen() {
       // Check if we have EXIF data from ImagePicker
       if (imagePickerAsset?.exif) {
         console.log('📊 EXIF data available:', Object.keys(imagePickerAsset.exif));
-        const { GPS } = imagePickerAsset.exif;
+        const exif = imagePickerAsset.exif;
         
-        if (GPS) {
-          console.log('🛰️ GPS object found:', GPS);
-          console.log('📍 GPS.Latitude:', GPS.Latitude);
-          console.log('📍 GPS.Longitude:', GPS.Longitude);
-          console.log('📍 GPS.LatitudeRef:', GPS.LatitudeRef);
-          console.log('📍 GPS.LongitudeRef:', GPS.LongitudeRef);
+        // First try nested GPS object (Android format)
+        const { GPS } = exif;
+        let latitude = null;
+        let longitude = null;
+        let latRef = null;
+        let lngRef = null;
+        
+        if (GPS && GPS.Latitude && GPS.Longitude) {
+          console.log('🛰️ GPS object found (Android format):', GPS);
+          latitude = GPS.Latitude;
+          longitude = GPS.Longitude;
+          latRef = GPS.LatitudeRef;
+          lngRef = GPS.LongitudeRef;
+        } 
+        // Try iPhone format with individual GPS keys
+        else if (exif.GPSLatitude && exif.GPSLongitude) {
+          console.log('🛰️ GPS keys found (iPhone format)');
+          latitude = exif.GPSLatitude;
+          longitude = exif.GPSLongitude;
+          latRef = exif.GPSLatitudeRef;
+          lngRef = exif.GPSLongitudeRef;
+        }
+        
+        if (latitude && longitude) {
+          console.log('✅ Valid GPS coordinates found!');
+          console.log('📍 Raw Latitude:', latitude, 'Ref:', latRef);
+          console.log('📍 Raw Longitude:', longitude, 'Ref:', lngRef);
           
-          if (GPS.Latitude && GPS.Longitude) {
-            console.log('✅ Valid GPS coordinates found!');
+          // Convert GPS coordinates to decimal degrees if needed
+          let finalLat = typeof latitude === 'number' ? latitude : parseFloat(latitude);
+          let finalLng = typeof longitude === 'number' ? longitude : parseFloat(longitude);
+          
+          // Handle GPS reference (N/S for latitude, E/W for longitude)
+          if (latRef === 'S' || latRef === 'South') finalLat = -Math.abs(finalLat);
+          if (lngRef === 'W' || lngRef === 'West') finalLng = -Math.abs(finalLng);
+          
+          // Extract camera direction/bearing data
+          let cameraDirection = null;
+          let accuracy = null;
+          
+          // Check for image direction (direction camera was pointing)
+          if (exif.GPSImgDirection !== undefined) {
+            const imgDirection = typeof exif.GPSImgDirection === 'number' ? exif.GPSImgDirection : parseFloat(exif.GPSImgDirection);
+            const imgDirectionRef = exif.GPSImgDirectionRef; // 'T' for True North, 'M' for Magnetic North
             
-            // Convert GPS coordinates to decimal degrees
-            let latitude = GPS.Latitude;
-            let longitude = GPS.Longitude;
-            
-            // Handle GPS reference (N/S for latitude, E/W for longitude)
-            if (GPS.LatitudeRef === 'S') latitude = -latitude;
-            if (GPS.LongitudeRef === 'W') longitude = -longitude;
-            
-            console.log(`📍 Final coordinates: ${latitude}, ${longitude}`);
-            console.log(`📍 This corresponds to: ${Math.abs(latitude).toFixed(6)}° ${latitude >= 0 ? 'N' : 'S'}, ${Math.abs(longitude).toFixed(6)}° ${longitude >= 0 ? 'E' : 'W'}`);
-            
-            return { latitude, longitude };
-          } else {
-            console.log('❌ GPS coordinates missing or invalid');
+            if (!isNaN(imgDirection) && imgDirection >= 0 && imgDirection <= 360) {
+              cameraDirection = imgDirection;
+              console.log(`🧭 Camera direction: ${cameraDirection}° (${imgDirectionRef === 'T' ? 'True North' : 'Magnetic North'})`);
+            }
           }
+          
+          // Check for GPS accuracy/precision
+          if (exif.GPSHPositioningError !== undefined) {
+            const hError = typeof exif.GPSHPositioningError === 'number' ? exif.GPSHPositioningError : parseFloat(exif.GPSHPositioningError);
+            if (!isNaN(hError)) {
+              accuracy = hError;
+              console.log(`🎯 GPS accuracy: ±${accuracy}m`);
+            }
+          }
+          
+          // Validate coordinates
+          if (isNaN(finalLat) || isNaN(finalLng) || 
+              finalLat < -90 || finalLat > 90 || 
+              finalLng < -180 || finalLng > 180) {
+            console.log('❌ Invalid GPS coordinates after processing:', finalLat, finalLng);
+            return null;
+          }
+          
+          console.log(`📍 Final coordinates: ${finalLat}, ${finalLng}`);
+          console.log(`📍 This corresponds to: ${Math.abs(finalLat).toFixed(6)}° ${finalLat >= 0 ? 'N' : 'S'}, ${Math.abs(finalLng).toFixed(6)}° ${finalLng >= 0 ? 'E' : 'W'}`);
+          
+          const result = { 
+            latitude: finalLat, 
+            longitude: finalLng,
+            ...(cameraDirection !== null && { direction: cameraDirection }),
+            ...(accuracy !== null && { accuracy })
+          };
+          
+          if (cameraDirection !== null) {
+            console.log(`🧭 Camera was pointing ${cameraDirection}° from North when photo taken`);
+          }
+          
+          return result;
         } else {
-          console.log('❌ No GPS object in EXIF data');
+          console.log('❌ No valid GPS coordinates found in EXIF');
+          console.log('📋 Available EXIF GPS keys:', Object.keys(exif).filter(key => key.startsWith('GPS')));
         }
       } else {
         console.log('❌ No EXIF data available');
@@ -173,21 +296,114 @@ export default function CaptureScreen() {
     }
   };
 
+  const calculateBearing = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const lat1Rad = lat1 * Math.PI / 180;
+    const lat2Rad = lat2 * Math.PI / 180;
+    
+    const y = Math.sin(dLng) * Math.cos(lat2Rad);
+    const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLng);
+    
+    let bearing = Math.atan2(y, x) * 180 / Math.PI;
+    bearing = (bearing + 360) % 360; // Normalize to 0-360
+    
+    return bearing;
+  };
+
+  const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+    const R = 6371000; // Earth's radius in meters
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+      Math.sin(dLng/2) * Math.sin(dLng/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  };
+
+  const filterPlacesByDirection = (places: any[], photoLocation: any, cameraDirection: number, tolerance: number = 30): any[] => {
+    if (!photoLocation.direction || places.length === 0) return places;
+    
+    console.log(`🧭 Filtering places by camera direction: ${cameraDirection}° (±${tolerance}°) with distance weighting`);
+    
+    // Score each place based on direction accuracy and distance
+    const scoredPlaces = places.map(place => {
+      const bearingToPlace = calculateBearing(
+        photoLocation.latitude, 
+        photoLocation.longitude,
+        place.geometry.location.lat,
+        place.geometry.location.lng
+      );
+      
+      const distanceToPlace = calculateDistance(
+        photoLocation.latitude,
+        photoLocation.longitude,
+        place.geometry.location.lat,
+        place.geometry.location.lng
+      );
+      
+      // Calculate angular difference (handling wraparound at 0/360)
+      let angleDiff = Math.abs(bearingToPlace - cameraDirection);
+      if (angleDiff > 180) angleDiff = 360 - angleDiff;
+      
+      const inDirection = angleDiff <= tolerance;
+      
+      // Scoring: Lower is better
+      // Direction score: 0-30 (lower angle diff = better score)
+      // Distance score: 0-100m normalized (closer = better score)
+      const directionScore = angleDiff; // 0-30 range
+      const distanceScore = Math.min(distanceToPlace, 100); // Cap at 100m
+      
+      // Combined score: 70% direction, 30% distance
+      const combinedScore = (directionScore * 0.7) + (distanceScore * 0.3);
+      
+      console.log(`📍 ${place.name}: bearing ${bearingToPlace.toFixed(1)}°, diff ${angleDiff.toFixed(1)}°, dist ${distanceToPlace.toFixed(1)}m, score ${combinedScore.toFixed(1)}, ${inDirection ? '✅ IN' : '❌ OUT'} direction`);
+      
+      return {
+        ...place,
+        directionScore,
+        distanceScore,
+        combinedScore,
+        inDirection,
+        distance: distanceToPlace,
+        angleDiff
+      };
+    });
+    
+    // Filter places within direction tolerance and sort by combined score
+    const filteredPlaces = scoredPlaces
+      .filter(place => place.inDirection)
+      .sort((a, b) => a.combinedScore - b.combinedScore); // Lower score = better
+    
+    console.log(`🎯 Direction filtering: ${filteredPlaces.length}/${places.length} places in camera direction`);
+    
+    if (filteredPlaces.length > 0) {
+      console.log(`🥇 Top candidate: ${filteredPlaces[0].name} (${filteredPlaces[0].distance.toFixed(1)}m, ${filteredPlaces[0].angleDiff.toFixed(1)}° diff)`);
+    }
+    
+    // Return original place objects (without scoring metadata)
+    return filteredPlaces.map(({ directionScore, distanceScore, combinedScore, inDirection, distance, angleDiff, ...place }) => place);
+  };
+
   const analyzePhoto = async (imageUri: string, imagePickerAsset?: any) => {
-    setIsAnalyzing(true);
+    setProcessingState('analyzing');
     try {
       console.log('Starting photo analysis...');
       
       // First, try to extract location from photo metadata
-      const photoLocation = await extractImageLocation(imageUri, imagePickerAsset);
-      console.log('📍 Photo location from metadata:', photoLocation);
+      const extractedPhotoLocation = await extractImageLocation(imageUri, imagePickerAsset);
+      console.log('📍 Photo location from metadata:', extractedPhotoLocation);
+      
+      // Store photo location in state for later use
+      setPhotoLocation(extractedPhotoLocation);
       
       // Use photo location if available, otherwise fall back to current location
-      const searchLocation = photoLocation || currentLocation;
+      const searchLocation = extractedPhotoLocation || currentLocation;
       
-      if (photoLocation) {
+      if (extractedPhotoLocation) {
         console.log('🎯 Using GPS coordinates from photo metadata!');
-        console.log(`📍 GPS Location: ${photoLocation.latitude}, ${photoLocation.longitude}`);
+        console.log(`📍 GPS Location: ${extractedPhotoLocation.latitude}, ${extractedPhotoLocation.longitude}`);
       } else if (currentLocation) {
         console.log('📱 Using current device location (no GPS in photo)');
         console.log(`📍 Device Location: ${currentLocation.latitude}, ${currentLocation.longitude}`);
@@ -202,9 +418,64 @@ export default function CaptureScreen() {
         return;
       }
 
+      // 🎯 CHECK FOR DUPLICATE PLACES FIRST!
+      console.log('🔍 Checking if place already exists...');
+      const { publicPlace, discoveryCount: count } = await checkPlaceExists(
+        undefined, // Will be set after getting place details
+        searchLocation.latitude,
+        searchLocation.longitude
+      );
+      
+      if (publicPlace) {
+        console.log(`✅ Found existing public place: ${publicPlace.name} (${count} discoveries)`);
+        setExistingPlace(publicPlace);
+        setDiscoveryCount(count);
+        setShowDiscoveryBanner(true);
+      }
+
+      // 🎯 CHECK FOR HIDDEN GEM DISCOVERY!
+      console.log('🔍 Checking for hidden gem discovery...');
+      const discoveredGem = await checkForHiddenGemDiscovery(searchLocation.latitude, searchLocation.longitude);
+      
+      if (discoveredGem && mounted.current) {
+        console.log('🏆 HIDDEN GEM WON!', discoveredGem);
+        haptics.hiddenGemFound(); // Special haptic feedback for hidden gem discovery
+        setDiscoveredHiddenGem(discoveredGem);
+        setShowHiddenGemWinner(true);
+        
+        // Show success alert with navigation options
+        Alert.alert(
+          '🎉 HIDDEN GEM DISCOVERED!',
+          `Congratulations! You found "${discoveredGem.title}" and won: ${discoveredGem.reward}`,
+          [
+            {
+              text: 'View Hidden Gem',
+              onPress: () => {
+                haptics.buttonPress();
+                setShowHiddenGemWinner(false);
+                router.push('/hidden-gem');
+              }
+            },
+            {
+              text: 'Continue',
+              onPress: () => {
+                haptics.buttonPress();
+                setShowHiddenGemWinner(false);
+              }
+            }
+          ]
+        );
+        
+        // Continue with normal flow but also show the hidden gem success
+      }
+
       // Analyze the photo with OpenAI
       console.log('Analyzing photo with OpenAI...');
-      const analysis = await analyzeStorefrontPhoto(imageUri, searchLocation);
+      if (!searchLocation) {
+        throw new Error('Location not available for analysis.');
+      }
+      const locationString = `${searchLocation.latitude},${searchLocation.longitude}`;
+      const analysis = await analyzeStorefrontPhoto(imageUri, locationString);
       console.log('OpenAI analysis result:', analysis);
       
       if (mounted.current) {
@@ -252,24 +523,69 @@ export default function CaptureScreen() {
         console.log(`📍 Found ${places.length} places within 200m`);
       }
       
-      // Step 3: If still no results, try generic nearby search
+      // Step 3: If still no results, expand to 500m with type focus
       if (places.length === 0) {
-        console.log('🔍 Fallback to generic nearby search...');
-        places = await searchNearbyPlaces(
+        console.log('🔍 Expanding to 500m with type focus...');
+        places = await searchNearbyPlacesWithType(
           searchLocation.latitude,
           searchLocation.longitude,
           businessName,
-          100 // 100 meter radius
+          businessType,
+          500 // 500 meter radius
         );
-        console.log(`📍 Found ${places.length} places using generic search`);
+        console.log(`📍 Found ${places.length} places within 500m`);
       }
       
       // Step 4: Final fallback to text search with location bias
       if (places.length === 0) {
         console.log('🌐 Final fallback to text search with location bias...');
-        const searchQuery = `${businessName} ${businessType}`;
+        
+        // Use more location-specific query for generic business names
+        const isGenericName = !businessName || 
+                             businessName.toLowerCase() === 'unknown' || 
+                             businessName.toLowerCase() === 'unknown business' ||
+                             businessName.toLowerCase() === 'business';
+        
+        let searchQuery;
+        if (isGenericName) {
+          // For generic names, search by business type only to get local results
+          searchQuery = businessType;
+        } else {
+          searchQuery = `${businessName} ${businessType}`;
+        }
+        
+        console.log(`🔍 Final fallback search query: "${searchQuery}"`);
         places = await searchPlacesByText(searchQuery, searchLocation.latitude, searchLocation.longitude);
         console.log(`📍 Found ${places.length} places using text search fallback`);
+      }
+
+      // Step 5: Apply camera direction filtering if we have direction data
+      if (places.length > 0 && extractedPhotoLocation && extractedPhotoLocation.direction !== undefined) {
+        console.log('🧭 Applying camera direction filtering...');
+        const originalCount = places.length;
+        const originalPlaces = [...places]; // Keep copy of original results
+        places = filterPlacesByDirection(places, extractedPhotoLocation, extractedPhotoLocation.direction, 45); // Increased tolerance to 45°
+        
+        // If direction filtering eliminated all results, fall back to original nearby results
+        if (places.length === 0) {
+          console.log('⚠️ Direction filtering eliminated all results, using closest nearby places instead');
+          
+          // Sort original places by distance and take top 5
+          const sortedByDistance = originalPlaces.map(place => {
+            const distance = calculateDistance(
+              searchLocation.latitude,
+              searchLocation.longitude,
+              place.geometry.location.lat,
+              place.geometry.location.lng
+            );
+            return { ...place, distance };
+          }).sort((a, b) => a.distance - b.distance);
+          
+          places = sortedByDistance.slice(0, 5); // Take 5 closest places
+          console.log(`🎯 Using ${places.length} closest nearby places as fallback`);
+        } else {
+          console.log(`🎯 Direction filtering reduced results from ${originalCount} to ${places.length}`);
+        }
       }
 
       if (places.length > 0) {
@@ -281,6 +597,21 @@ export default function CaptureScreen() {
         if (placeDetails && mounted.current) {
           console.log('Place details received:', placeDetails);
           
+          // Check for duplicates with Google Place ID now that we have it
+          console.log('🔍 Re-checking for duplicates with Google Place ID...');
+          const { publicPlace: exactPlace, discoveryCount: exactCount } = await checkPlaceExists(
+            placeDetails.place_id,
+            placeDetails.geometry.location.lat,
+            placeDetails.geometry.location.lng
+          );
+          
+          if (exactPlace && !existingPlace) {
+            console.log(`✅ Found exact match by Google Place ID: ${exactPlace.name} (${exactCount} discoveries)`);
+            setExistingPlace(exactPlace);
+            setDiscoveryCount(exactCount);
+            setShowDiscoveryBanner(true);
+          }
+
           // Generate AI review summary from actual Google reviews
           let reviewSummary;
           if (placeDetails.reviews && placeDetails.reviews.length > 0) {
@@ -326,59 +657,117 @@ export default function CaptureScreen() {
 
           setPlaceData(formattedPlace);
           setSuggestedPlaces(places.slice(1, 6)); // Show other suggestions
+          
+          // Show completion state briefly before showing results
+          setProcessingState('complete');
+          setTimeout(() => {
+            if (mounted.current) {
+              setProcessingState('idle');
+            }
+          }, 1000); // Show complete state for 1 second
+          
+          haptics.placeDiscovered(); // Haptic feedback when place is found
         }
       } else {
         console.log('No places found, showing place selection');
         setSuggestedPlaces([]);
         setShowPlaceSelection(true);
+        
+        // Show completion state briefly before showing place selection
+        setProcessingState('complete');
+        setTimeout(() => {
+          if (mounted.current) {
+            setProcessingState('idle');
+          }
+        }, 1000);
       }
     } catch (error) {
       console.error('Error analyzing photo:', error);
+      haptics.errorOccurred(); // Haptic feedback on error
       Alert.alert('Analysis Failed', 'Failed to analyze the photo. Please try again.');
     } finally {
       if (mounted.current) {
-        setIsAnalyzing(false);
+        setProcessingState('idle');
       }
     }
   };
 
   const takePicture = async () => {
-    if (cameraRef.current) {
-      try {
-        const photo = await cameraRef.current.takePictureAsync({
-          quality: 0.8,
-          base64: false,
-          exif: true, // Include EXIF data
-        });
+    if (!cameraRef.current) return;
+
+    setProcessingState('uploading');
+    try {
+      haptics.photoCapture();
+      
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.7, // Reduced for faster processing - will be further optimized in upload
+        base64: false,
+        exif: true,
+      });
+      
+      if (photo && mounted.current) {
+        const localUri = photo.uri;
         
-        if (photo && mounted.current) {
-          setCapturedImage(photo.uri);
-          await analyzePhoto(photo.uri, photo);
+        // Upload to Supabase (both thumbnail and full-size)
+        const uploadResult = await uploadImageAsync(localUri);
+        
+        if (!uploadResult) {
+          throw new Error('Failed to upload image');
         }
-      } catch (error) {
-        console.error('Error taking picture:', error);
-        Alert.alert('Camera Error', 'Failed to take picture. Please try again.');
+        
+        // Store both URLs - full-size for analysis, thumbnail for later use
+        setCapturedImage(uploadResult.fullUrl);
+        setCapturedImageThumbnail(uploadResult.thumbnailUrl);
+        await analyzePhoto(uploadResult.fullUrl, photo);
+      }
+    } catch (error) {
+      console.error('Error taking or uploading picture:', error);
+      Alert.alert('Camera Error', 'Failed to process picture. Please try again.');
+    } finally {
+      if (mounted.current && processingState !== 'analyzing') {
+        setProcessingState('idle');
       }
     }
   };
 
   const pickImageFromGallery = async () => {
+    setProcessingState('uploading');
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: 'images',
         allowsEditing: true,
         aspect: [4, 3],
         quality: 0.8,
         exif: true, // Include EXIF data
       });
 
-      if (!result.canceled && result.assets[0] && mounted.current) {
-        setCapturedImage(result.assets[0].uri);
-        await analyzePhoto(result.assets[0].uri, result.assets[0]);
+      if (result.canceled || !result.assets || !result.assets[0]) {
+        setProcessingState('idle');
+        return;
+      }
+
+      if (mounted.current) {
+        const localUri = result.assets[0].uri;
+        
+        // Upload to Supabase (both thumbnail and full-size)
+        const uploadResult = await uploadImageAsync(localUri);
+        
+        if (!uploadResult) {
+          throw new Error('Failed to upload image');
+        }
+        
+        // Store both URLs - full-size for analysis, thumbnail for later use
+        setCapturedImage(uploadResult.fullUrl);
+        setCapturedImageThumbnail(uploadResult.thumbnailUrl);
+        await analyzePhoto(uploadResult.fullUrl, result.assets[0]);
       }
     } catch (error) {
-      console.error('Error picking image:', error);
-      Alert.alert('Gallery Error', 'Failed to pick image. Please try again.');
+      console.error('Error picking and uploading image:', error);
+      Alert.alert('Upload Error', 'Failed to upload image. Please check your connection and try again.');
+    } finally {
+      if (mounted.current && processingState !== 'analyzing') {
+        setProcessingState('idle');
+      }
     }
   };
 
@@ -416,6 +805,7 @@ export default function CaptureScreen() {
           rating: placeDetails.rating || 0,
           review_count: placeDetails.user_ratings_total || 0,
           image_url: capturedImage || '',
+          thumbnail_url: capturedImageThumbnail || '',
           ai_summary: reviewSummary.summary,
           pros: reviewSummary.pros,
           cons: reviewSummary.cons,
@@ -430,6 +820,7 @@ export default function CaptureScreen() {
 
         setPlaceData(formattedPlace);
         setShowPlaceSelection(false);
+        setProcessingState('complete');
       }
     } catch (error) {
       console.error('Error selecting place:', error);
@@ -563,11 +954,16 @@ export default function CaptureScreen() {
       const collectionData = {
         name: newCollectionName.trim(),
         user_id: user.id,
-        color: '#007AFF'
+        color: '#007AFF',
+        is_public: true
       };
 
       console.log('📝 Collection data:', collectionData);
-      const { data, error } = await createCollection(collectionData);
+      const { data, error } = await supabase
+        .from('collections')
+        .insert(collectionData)
+        .select()
+        .single();
       
       if (error) {
         console.error('❌ Error creating collection:', error);
@@ -627,18 +1023,19 @@ export default function CaptureScreen() {
         is_open: placeData.is_open,
         hours: placeData.hours,
         week_hours: placeData.week_hours,
-        added_by: user.id
+        added_by: user.id,
+        is_public: true
       };
 
       console.log('📁 Adding place to database first:', placeToAdd);
-      const { data: addedPlace, error: placeError } = await addPlace(placeToAdd);
+      const { data: addedPlace, error } = await supabase.from('places').insert(placeToAdd).select().single();
       
-      if (placeError) {
-        console.error('❌ Error adding place:', placeError);
-        Alert.alert('Error', `Failed to save place: ${placeError.message || 'Unknown error'}`);
+      if (error) {
+        console.error('❌ Error adding place:', error);
+        Alert.alert('Error', `Failed to save place: ${error.message || 'Unknown error'}`);
         return;
       }
-
+      
       if (!addedPlace) {
         console.error('❌ No place data returned');
         Alert.alert('Error', 'Failed to save place - no data returned.');
@@ -658,28 +1055,103 @@ export default function CaptureScreen() {
       }
 
       console.log('✅ Added to collection successfully:', collectionPlaceData);
+      haptics.addToCollection(); // Haptic feedback for successful addition
       Alert.alert('Success', 'Place added to collection successfully!');
+      
+      // Close modal first, then reset with delay to prevent race conditions
       setShowCollections(false);
-      resetCapture();
+      
+      // Use setTimeout to batch state updates and prevent crash
+      setTimeout(() => {
+        if (mounted.current) {
+          resetCapture();
+        }
+      }, 100);
     } catch (error) {
       console.error('❌ Error adding to collection:', error);
       Alert.alert('Error', `Failed to add place to collection: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
-  const handleSharePublicly = async () => {
+  const handleWrongPlace = async () => {
+    try {
+      console.log('🔄 User indicated wrong place, loading all nearby places...');
+      setIsLoading(true);
+      
+      // Use stored photo location if available, otherwise analysis coordinates, otherwise current location
+      const searchLocation = photoLocation || (analysisResult?.coordinates) || currentLocation;
+      
+      if (!searchLocation) {
+        Alert.alert('Location Required', 'Unable to find nearby places without location information.');
+        return;
+      }
+
+      // Search for all nearby places with a broader radius
+      console.log('🔍 Searching nearby places for manual selection...');
+      let allNearbyPlaces = await searchNearbyPlaces(
+        searchLocation.latitude,
+        searchLocation.longitude,
+        undefined, // No specific query - get all nearby places
+        500 // 500 meter radius for more options
+      );
+
+      console.log(`📍 Found ${allNearbyPlaces.length} nearby places for manual selection`);
+
+      if (allNearbyPlaces.length === 0) {
+        // If no results with 500m, try 1000m
+        console.log('🔍 Expanding search to 1000m radius...');
+        allNearbyPlaces = await searchNearbyPlaces(
+          searchLocation.latitude,
+          searchLocation.longitude,
+          undefined,
+          1000
+        );
+        console.log(`📍 Found ${allNearbyPlaces.length} places within 1000m`);
+      }
+
+      if (allNearbyPlaces.length === 0) {
+        Alert.alert('No Places Found', 'No nearby places found. Please try a different location or manually search.');
+        return;
+      }
+
+      // Sort places by distance
+      const placesWithDistance = allNearbyPlaces.map(place => {
+        const distance = calculateDistance(
+          searchLocation.latitude,
+          searchLocation.longitude,
+          place.geometry.location.lat,
+          place.geometry.location.lng
+        );
+        return { ...place, distance };
+      }).sort((a, b) => a.distance - b.distance);
+
+      console.log(`🎯 Showing ${placesWithDistance.length} nearby places sorted by distance`);
+      setSuggestedPlaces(placesWithDistance);
+      setSearchQuery(''); // Clear search query
+      setShowPlaceSelection(true);
+      console.log(`📱 Place selection modal should now be visible: ${true}`);
+      
+    } catch (error) {
+      console.error('❌ Error loading nearby places:', error);
+      Alert.alert('Error', 'Failed to load nearby places. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSaveAndRecommend = async () => {
     if (!placeData) return;
     
     try {
       setIsLoading(true);
-      console.log('📤 Sharing place publicly:', placeData.name);
+      console.log('📤 Saving and recommending place:', placeData.name);
       const user = await getCurrentUser();
       if (!user) {
-        Alert.alert('Error', 'Please sign in to share places.');
+        Alert.alert('Error', 'Please sign in to save places.');
         return;
       }
 
-      // Step 1: Share the place publicly
+      // Save place as public (visible to everyone)
       const placeToAdd = {
         name: placeData.name,
         category: placeData.category,
@@ -699,111 +1171,286 @@ export default function CaptureScreen() {
         week_hours: placeData.week_hours,
         phone: placeData.phone,
         website: placeData.website,
-        added_by: user.id
+        added_by: user.id,
+        is_public: true
       };
 
-      console.log('📤 Adding place to database:', JSON.stringify(placeToAdd, null, 2));
-      const { data: addedPlace, error } = await addPlace(placeToAdd);
+      console.log('📤 Adding place as public to database:', placeToAdd.name);
+      const { data: addedPlace, error } = await addPlaceWithVisibility(placeToAdd, true); // true = public
       
       if (error) {
-        console.error('❌ Error sharing place:', error);
-        console.error('❌ Error details:', JSON.stringify(error, null, 2));
-        Alert.alert('Error', `Failed to share place: ${error.message || error.details || 'Unknown error'}`);
+        console.error('❌ Error saving and recommending place:', error);
+        Alert.alert('Error', `Failed to save place: ${error.message || 'Unknown error'}`);
         return;
       }
       
       if (!addedPlace) {
-        console.error('❌ No data returned from addPlace');
-        Alert.alert('Error', 'Failed to share place - no data returned.');
+        console.error('❌ No data returned from addPlaceWithVisibility');
+        Alert.alert('Error', 'Failed to save place - no data returned.');
         return;
       }
 
-      console.log('✅ Place shared successfully:', JSON.stringify(addedPlace, null, 2));
+      console.log('✅ Place saved and recommended successfully:', addedPlace.name);
 
-      // Step 2: Create or find "Shared Places" collection
-      console.log('📁 Finding or creating "Shared Places" collection...');
-      let sharedCollection = null;
+      // Create or find "Recommended Places" collection
+      console.log('📁 Finding or creating "Recommended Places" collection...');
+      let recommendedCollection = null;
       
-      // Load user collections to check if "Shared Places" exists
       const userCollections = await getUserCollections(user.id);
       if (userCollections) {
-        sharedCollection = userCollections.find((c: any) => c.name === 'Shared Places');
+        recommendedCollection = userCollections.find((c: any) => c.name === 'Recommended Places');
       }
       
-      // Create "Shared Places" collection if it doesn't exist
-      if (!sharedCollection) {
-        console.log('📁 Creating "Shared Places" collection...');
-        const { data: newCollection, error: createError } = await createCollection({
-          name: 'Shared Places',
-          user_id: user.id,
-          color: '#34C759' // Green color for shared places
-        });
+      if (!recommendedCollection) {
+        console.log('📁 Creating "Recommended Places" collection...');
+        const { data: newCollection, error: createError } = await supabase
+        .from('collections')
+        .insert({ name: 'Recommended Places', user_id: user.id, color: '#34C759', is_public: true })
+        .select()
+        .single();
         
         if (createError) {
-          console.error('❌ Error creating shared collection:', createError);
-          // Continue without adding to collection, but still show success for sharing
+          console.error('❌ Error creating recommended collection:', createError);
         } else {
-          sharedCollection = newCollection;
-          console.log('✅ Created "Shared Places" collection:', sharedCollection);
+          recommendedCollection = newCollection;
+          console.log('✅ Created "Recommended Places" collection:', recommendedCollection);
         }
       }
 
-      // Step 3: Add place to "Shared Places" collection
-      if (sharedCollection) {
-        console.log('📁 Adding to "Shared Places" collection...');
-        const { error: collectionError } = await addPlaceToCollection(sharedCollection.id, addedPlace.id);
+      // Add place to "Recommended Places" collection
+      if (recommendedCollection) {
+        console.log('📁 Adding to collection:', { collectionId: recommendedCollection.id, placeId: addedPlace.id });
+        const { error: collectionError } = await supabase.from('collection_places').insert({ collection_id: recommendedCollection.id, place_id: addedPlace.id });
         
         if (collectionError) {
-          console.error('❌ Error adding to shared collection:', collectionError);
-          // Continue, don't fail the whole operation
+          console.error('❌ Error adding to recommended collection:', collectionError);
         } else {
-          console.log('✅ Added to "Shared Places" collection successfully');
+          console.log('✅ Added to "Recommended Places" collection successfully');
         }
       }
 
-      // Step 4: Show success message
+      // Show success message
+      haptics.shareSuccess();
       Alert.alert(
         '🎉 Successfully Recommended!', 
-        `${placeData.name} has been shared with the community and added to your "Shared Places" collection.`,
+        `${placeData.name} has been shared with the community and added to your "Recommended Places" collection.`,
         [
           {
             text: 'View on Discover',
             onPress: () => {
+              haptics.buttonPress();
               resetCapture();
               router.push('/(tabs)');
             }
           },
           {
             text: 'Take Another Photo',
-            onPress: () => resetCapture()
+            onPress: () => {
+              haptics.buttonPress();
+              resetCapture();
+            }
           }
         ]
       );
       
     } catch (error) {
-      console.error('❌ Error sharing publicly:', error);
-      Alert.alert('Error', `Failed to share place: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('❌ Error saving and recommending:', error);
+      Alert.alert('Error', `Failed to save place: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const handleSaveOnly = async () => {
+    if (!placeData) return;
+    
+    try {
+      setIsLoading(true);
+      console.log('💾 Saving place privately:', placeData.name);
+      const user = await getCurrentUser();
+      if (!user) {
+        Alert.alert('Error', 'Please sign in to save places.');
+        return;
+      }
+
+      // Save place as private (not visible to others)
+      const placeToAdd = {
+        name: placeData.name,
+        category: placeData.category,
+        address: placeData.address,
+        latitude: placeData.latitude,
+        longitude: placeData.longitude,
+        rating: placeData.rating,
+        review_count: placeData.review_count,
+        image_url: placeData.image_url,
+        ai_summary: placeData.ai_summary,
+        pros: placeData.pros,
+        cons: placeData.cons,
+        recommendations: placeData.recommendations,
+        google_place_id: placeData.google_place_id,
+        is_open: placeData.is_open,
+        hours: placeData.hours,
+        week_hours: placeData.week_hours,
+        phone: placeData.phone,
+        website: placeData.website,
+        added_by: user.id,
+        is_public: false
+      };
+
+      console.log('💾 Adding place as private to database:', placeToAdd.name);
+      const { data: addedPlace, error } = await addPlaceWithVisibility(placeToAdd, false); // false = private
+      
+      if (error) {
+        console.error('❌ Error saving place privately:', error);
+        Alert.alert('Error', `Failed to save place: ${error.message || 'Unknown error'}`);
+        return;
+      }
+      
+      if (!addedPlace) {
+        console.error('❌ No data returned from addPlaceWithVisibility');
+        Alert.alert('Error', 'Failed to save place - no data returned.');
+        return;
+      }
+
+      console.log('✅ Place saved privately successfully:', addedPlace.name);
+
+      // Show collections modal for user to choose where to save
+      await loadUserCollections();
+      setShowCollections(true);
+      
+    } catch (error) {
+      console.error('❌ Error saving privately:', error);
+      Alert.alert('Error', `Failed to save place: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const performBroaderSearch = async (query: string) => {
+    if (!query.trim() || query.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    try {
+      setIsSearching(true);
+      console.log(`🔍 Performing broader search for: "${query}"`);
+      
+      // Use photo location if available, otherwise current location
+      const searchLocation = photoLocation || currentLocation;
+      
+      if (!searchLocation) {
+        console.log('❌ No location available for broader search');
+        return;
+      }
+
+      // Search Google Places API directly with text query
+      const results = await searchPlacesByText(
+        query,
+        searchLocation.latitude,
+        searchLocation.longitude
+      );
+
+      console.log(`📍 Broader search found ${results.length} results for "${query}"`);
+      setSearchResults(results);
+      
+    } catch (error) {
+      console.error('❌ Error in broader search:', error);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
   const resetCapture = () => {
     setCapturedImage(null);
+    setCapturedImageThumbnail(null);
     setAnalysisResult(null);
     setPlaceData(null);
+    setProcessingState('idle');
     setSuggestedPlaces([]);
     setShowPlaceSelection(false);
     setShowFullHours(false);
     setManualAddress('');
     setShowAddressInput(false);
     setSearchQuery('');
+    setDiscoveredHiddenGem(null);
+    setShowHiddenGemWinner(false);
+    setExistingPlace(null);
+    setDiscoveryCount(0);
+    setShowDiscoveryBanner(false);
+    setPhotoLocation(null);
+    setIsSearching(false);
+    setSearchResults([]);
   };
 
-  const filteredSuggestedPlaces = suggestedPlaces.filter(place =>
-    place.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    place.formatted_address.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredSuggestedPlaces = React.useMemo(() => {
+    if (!searchQuery.trim()) {
+      return suggestedPlaces; // Show all nearby places when no search query
+    }
+    
+    const query = searchQuery.toLowerCase();
+    
+    // Filter local nearby places
+    const localFiltered = suggestedPlaces.filter(place => {
+      const name = (place.name?.toLowerCase() || '');
+      const address = (place.formatted_address?.toLowerCase() || '');
+      const types = (place.types || []).join(' ').toLowerCase();
+      
+      return name.includes(query) || 
+             address.includes(query) || 
+             types.includes(query) ||
+             // More flexible partial matching
+             name.split(' ').some((word: string) => word.startsWith(query)) ||
+             address.split(' ').some((word: string) => word.startsWith(query));
+    });
+
+    // If we found good local matches, prioritize them
+    if (localFiltered.length > 0) {
+      // Also include API search results but show local results first
+      const uniqueApiResults = searchResults.filter(apiPlace => 
+        !localFiltered.some(localPlace => 
+          localPlace.place_id === apiPlace.place_id ||
+          (localPlace.name === apiPlace.name && 
+           localPlace.formatted_address === apiPlace.formatted_address)
+        )
+      );
+      return [...localFiltered, ...uniqueApiResults];
+    }
+
+    // If no local matches, show API search results
+    return searchResults;
+  }, [suggestedPlaces, searchResults, searchQuery]);
+
+  // Debounced search effect for broader API search
+  React.useEffect(() => {
+    if (!showPlaceSelection || !searchQuery.trim()) {
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      performBroaderSearch(searchQuery);
+    }, 500); // 500ms debounce
+
+    return () => clearTimeout(timeoutId);
+  }, [searchQuery, showPlaceSelection]);
+
+  // Debug logging for modal
+  React.useEffect(() => {
+    if (showPlaceSelection) {
+      console.log(`🔍 Modal should be visible: ${showPlaceSelection}`);
+      console.log(`📋 Total suggested places: ${suggestedPlaces.length}`);
+      console.log(`🔍 API search results: ${searchResults.length}`);
+      console.log(`🔎 Final filtered places: ${filteredSuggestedPlaces.length}`);
+      console.log(`🔤 Search query: "${searchQuery}"`);
+      if (suggestedPlaces.length > 0) {
+        console.log(`📍 First nearby place: ${suggestedPlaces[0]?.name || 'Unknown'}`);
+      }
+      if (searchResults.length > 0) {
+        console.log(`🌐 First API result: ${searchResults[0]?.name || 'Unknown'}`);
+      }
+    }
+  }, [showPlaceSelection, suggestedPlaces, searchResults, filteredSuggestedPlaces, searchQuery]);
 
   if (!permission) {
     return <View style={styles.container} />;
@@ -813,7 +1460,7 @@ export default function CaptureScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.permissionContainer}>
-          <Camera size={64} color="#8E8E93" strokeWidth={1.5} />
+          <CameraIcon size={64} color="#8E8E93" strokeWidth={1.5} />
           <Text style={styles.permissionTitle}>Camera Access Required</Text>
           <Text style={styles.permissionMessage}>
             We need access to your camera to capture storefront photos and identify places.
@@ -856,17 +1503,83 @@ export default function CaptureScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Header with Back Button */}
+      <View style={styles.analysisHeader}>
+        <TouchableOpacity style={styles.backButton} onPress={() => { haptics.navigationBack(); resetCapture(); }}>
+          <ArrowLeft size={24} color="#007AFF" strokeWidth={2} />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Place Details</Text>
+        <View style={styles.headerSpacer} />
+      </View>
+      
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
         <View style={styles.resultSection}>
           {/* Captured Image */}
-          <Image source={{ uri: capturedImage }} style={styles.capturedImage} />
-          
-          {isAnalyzing ? (
-            <View style={styles.analyzingContainer}>
-              <ActivityIndicator size="large" color="#007AFF" />
-              <Text style={styles.analyzingText}>Analyzing storefront...</Text>
+          <Image 
+            source={{ uri: capturedImage }} 
+            style={styles.capturedImage}
+            contentFit="cover"
+            transition={300}
+            cachePolicy="memory-disk"
+            priority="high"
+          />
+          {(processingState === 'uploading' || processingState === 'analyzing' || processingState === 'complete') && (
+            <View style={styles.processingOverlay}>
+              <View style={styles.processingCard}>
+                {processingState === 'complete' ? (
+                  <>
+                    <View style={styles.successIcon}>
+                      <Text style={styles.successIconText}>✓</Text>
+                    </View>
+                    <Text style={styles.processingTitle}>Complete!</Text>
+                    <Text style={styles.processingSubtitle}>Successfully identified your place</Text>
+                  </>
+                ) : (
+                  <>
+                    <ActivityIndicator size="large" color="#007AFF" style={styles.processingSpinner} />
+                    <Text style={styles.processingTitle}>
+                      {processingState === 'uploading' ? 'Uploading Photo' : 'Analyzing Storefront'}
+                    </Text>
+                    <Text style={styles.processingSubtitle}>
+                      {processingState === 'uploading' 
+                        ? 'Optimizing and uploading your photo...' 
+                        : 'Identifying place details and information...'
+                      }
+                    </Text>
+                    
+                    {/* Progress Steps */}
+                    <View style={styles.progressSteps}>
+                      <View style={[styles.progressStep, (processingState === 'uploading' || processingState === 'analyzing') ? styles.progressStepActive : null]}>
+                        <View style={[styles.progressDot, (processingState === 'uploading' || processingState === 'analyzing') ? styles.progressDotActive : null]} />
+                        <Text style={[styles.progressLabel, (processingState === 'uploading' || processingState === 'analyzing') ? styles.progressLabelActive : null]}>Upload</Text>
+                      </View>
+                      <View style={[styles.progressLine, processingState === 'analyzing' ? styles.progressLineActive : null]} />
+                      <View style={[styles.progressStep, processingState === 'analyzing' ? styles.progressStepActive : null]}>
+                        <View style={[styles.progressDot, processingState === 'analyzing' ? styles.progressDotActive : null]} />
+                        <Text style={[styles.progressLabel, processingState === 'analyzing' ? styles.progressLabelActive : null]}>Analyze</Text>
+                      </View>
+                    </View>
+                  </>
+                )}
+              </View>
             </View>
-          ) : placeData ? (
+          )}
+          
+          {/* Hidden Gem Discovery Banner */}
+          {discoveredHiddenGem && (
+            <View style={styles.hiddenGemBanner}>
+              <View style={styles.hiddenGemBannerContent}>
+                <Text style={styles.hiddenGemBannerIcon}>🎉</Text>
+                <View style={styles.hiddenGemBannerText}>
+                  <Text style={styles.hiddenGemBannerTitle}>HIDDEN GEM DISCOVERED!</Text>
+                  <Text style={styles.hiddenGemBannerSubtitle}>{discoveredHiddenGem.title}</Text>
+                  <Text style={styles.hiddenGemBannerReward}>Won: {discoveredHiddenGem.reward}</Text>
+                </View>
+              </View>
+            </View>
+          )}
+          
+          {placeData ? (
             <View style={styles.placeDetails}>
               {/* Header with Name */}
               <View style={styles.placeHeader}>
@@ -874,42 +1587,78 @@ export default function CaptureScreen() {
                 <Text style={styles.placeCategory}>{placeData.category}</Text>
               </View>
 
-              {/* Action Buttons */}
+              {/* Discovery Banner */}
+              {showDiscoveryBanner && existingPlace && (
+                <View style={styles.discoveryBanner}>
+                  <Text style={styles.discoveryBannerText}>
+                    🎉 You're the {discoveryCount + 1} person to discover this place!
+                  </Text>
+                  <Text style={styles.discoveryBannerSubtext}>
+                    This place was already recommended by another user.
+                  </Text>
+                </View>
+              )}
+
+              {/* Action Buttons - New System */}
               <View style={styles.actionButtonsRow}>
-                <TouchableOpacity style={styles.actionBtn} onPress={handleAddToCollection}>
-                  <Plus size={16} color="#007AFF" strokeWidth={2} />
-                  <Text style={styles.actionBtnText}>Save</Text>
-                </TouchableOpacity>
+                {existingPlace ? (
+                  // If place already exists publicly, only show collection options
+                  <>
+                    <TouchableOpacity 
+                      style={[styles.actionBtn, styles.primaryActionBtn]} 
+                      onPress={() => { haptics.buttonPress(); handleAddToCollection(); }}
+                    >
+                      <Plus size={16} color="#FFFFFF" strokeWidth={2} />
+                      <Text style={[styles.actionBtnText, styles.primaryActionBtnText]}>Add to Collection</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  // If place is new, show save options
+                  <>
+                    <TouchableOpacity 
+                      style={[styles.actionBtn, styles.primaryActionBtn, isLoading && styles.actionBtnDisabled]} 
+                      onPress={() => { haptics.buttonPress(); handleSaveAndRecommend(); }}
+                      disabled={isLoading}
+                    >
+                      {isLoading ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Share size={16} color="#FFFFFF" strokeWidth={2} />
+                      )}
+                      <Text style={[styles.actionBtnText, styles.primaryActionBtnText]}>
+                        {isLoading ? 'Saving...' : 'Save & Recommend'}
+                      </Text>
+                    </TouchableOpacity>
+                    
+                    <TouchableOpacity 
+                      style={[styles.actionBtn, styles.saveOnlyBtn]} 
+                      onPress={() => { haptics.buttonPress(); handleSaveOnly(); }}
+                      activeOpacity={0.7}
+                    >
+                      <Plus size={16} color="#007AFF" strokeWidth={2} />
+                      <Text style={styles.actionBtnText}>Save Only</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
                 
                 <TouchableOpacity 
-                  style={[styles.actionBtn, isLoading && styles.actionBtnDisabled]} 
-                  onPress={handleSharePublicly}
-                  disabled={isLoading}
+                  style={[styles.actionBtn, styles.retakeBtn]} 
+                  onPress={() => { haptics.buttonPress(); resetCapture(); }}
+                  activeOpacity={0.7}
                 >
-                  {isLoading ? (
-                    <ActivityIndicator size="small" color="#007AFF" />
-                  ) : (
-                    <Share size={16} color="#007AFF" strokeWidth={2} />
-                  )}
-                  <Text style={styles.actionBtnText}>
-                    {isLoading ? 'Sharing...' : 'Recommend'}
-                  </Text>
-                </TouchableOpacity>
-                
-                <TouchableOpacity style={styles.actionBtn} onPress={resetCapture}>
-                  <Camera size={16} color="#007AFF" strokeWidth={2} />
+                  <CameraIcon size={16} color="#007AFF" strokeWidth={2} />
                   <Text style={styles.actionBtnText}>Retake</Text>
                 </TouchableOpacity>
                 
-                {suggestedPlaces.length > 0 && (
-                  <TouchableOpacity 
-                    style={styles.actionBtn} 
-                    onPress={() => setShowPlaceSelection(true)}
-                  >
-                    <RotateCcw size={16} color="#007AFF" strokeWidth={2} />
-                    <Text style={styles.actionBtnText}>Wrong?</Text>
-                  </TouchableOpacity>
-                )}
+                {/* Always show Wrong button - allows manual search even with no nearby places */}
+                <TouchableOpacity 
+                  style={[styles.actionBtn, styles.wrongBtn]} 
+                  onPress={() => { haptics.buttonPress(); handleWrongPlace(); }}
+                  activeOpacity={0.7}
+                >
+                  <RotateCcw size={16} color="#007AFF" strokeWidth={2} />
+                  <Text style={styles.actionBtnText}>Wrong?</Text>
+                </TouchableOpacity>
               </View>
 
               {/* Rating and Status */}
@@ -941,8 +1690,8 @@ export default function CaptureScreen() {
               {/* Full Hours Dropdown */}
               {showFullHours && (
                 <View style={styles.fullHours}>
-                  {placeData.week_hours.map((hours, index) => (
-                    <Text key={index} style={styles.dayHours}>{hours}</Text>
+                  {placeData.week_hours.map((hours) => (
+                    <Text key={hours} style={styles.dayHours}>{hours}</Text>
                   ))}
                 </View>
               )}
@@ -974,23 +1723,23 @@ export default function CaptureScreen() {
                 <View style={styles.prosConsContainer}>
                   <View style={styles.prosSection}>
                     <Text style={styles.prosConsTitle}>What People Love</Text>
-                    {placeData.pros.map((pro, index) => (
-                      <Text key={index} style={styles.prosConsItem}>• {pro}</Text>
+                    {placeData.pros.map((pro) => (
+                      <Text key={`pro-${pro}`} style={styles.prosConsItem}>• {pro}</Text>
                     ))}
                   </View>
                   
                   <View style={styles.consSection}>
                     <Text style={styles.prosConsTitle}>Things to Know</Text>
-                    {placeData.cons.map((con, index) => (
-                      <Text key={index} style={styles.prosConsItem}>• {con}</Text>
+                    {placeData.cons.map((con) => (
+                      <Text key={`con-${con}`} style={styles.prosConsItem}>• {con}</Text>
                     ))}
                   </View>
                 </View>
 
                 <View style={styles.recommendationsSection}>
                   <Text style={styles.prosConsTitle}>Recommendations</Text>
-                  {placeData.recommendations.map((rec, index) => (
-                    <Text key={index} style={styles.prosConsItem}>• {rec}</Text>
+                  {placeData.recommendations.map((rec) => (
+                    <Text key={`rec-${rec}`} style={styles.prosConsItem}>• {rec}</Text>
                   ))}
                 </View>
               </View>
@@ -1090,31 +1839,78 @@ export default function CaptureScreen() {
             <Search size={20} color="#8E8E93" strokeWidth={2} />
             <TextInput
               style={styles.searchInput}
-              placeholder="Search places..."
+              placeholder="Search for any place name or business type..."
               value={searchQuery}
               onChangeText={setSearchQuery}
             />
+            {isSearching && (
+              <ActivityIndicator size="small" color="#007AFF" />
+            )}
+            {searchQuery.length > 0 && !isSearching && (
+              <TouchableOpacity 
+                onPress={() => {
+                  setSearchQuery('');
+                  setSearchResults([]);
+                }}
+                style={styles.clearSearchButton}
+              >
+                <Text style={styles.clearSearchText}>Clear</Text>
+              </TouchableOpacity>
+            )}
           </View>
           
           <ScrollView style={styles.placesList}>
-            {filteredSuggestedPlaces.map((place, index) => (
-              <TouchableOpacity
-                key={index}
-                style={styles.placeItem}
-                onPress={() => handlePlaceSelection(place)}
-              >
-                <View style={styles.placeItemInfo}>
-                  <Text style={styles.placeItemName}>{place.name}</Text>
-                  <Text style={styles.placeItemAddress}>{place.formatted_address}</Text>
-                  {place.rating && (
-                    <View style={styles.placeItemRating}>
-                      <Star size={12} color="#FFD700" strokeWidth={2} fill="#FFD700" />
-                      <Text style={styles.placeItemRatingText}>{place.rating}</Text>
-                    </View>
-                  )}
-                </View>
-              </TouchableOpacity>
-            ))}
+            {filteredSuggestedPlaces.length === 0 && searchQuery.trim() && !isSearching ? (
+              <View style={styles.noResultsContainer}>
+                <Text style={styles.noResultsText}>No places found for "{searchQuery}"</Text>
+                <Text style={styles.noResultsSubtext}>
+                  We searched both nearby places and broader area results
+                </Text>
+                <TouchableOpacity 
+                  style={styles.clearSearchButton}
+                  onPress={() => {
+                    setSearchQuery('');
+                    setSearchResults([]);
+                  }}
+                >
+                  <Text style={styles.clearSearchText}>Clear search</Text>
+                </TouchableOpacity>
+              </View>
+            ) : filteredSuggestedPlaces.length === 0 && !searchQuery.trim() && !isSearching ? (
+              <View style={styles.noResultsContainer}>
+                <Text style={styles.noResultsText}>No nearby places found</Text>
+                <Text style={styles.noResultsSubtext}>
+                  Try searching for the place name or type in the search box above
+                </Text>
+                <Text style={styles.searchHintText}>
+                  💡 You can search for any business name, address, or type of place
+                </Text>
+              </View>
+            ) : isSearching && searchQuery.trim() ? (
+              <View style={styles.searchingContainer}>
+                <ActivityIndicator size="large" color="#007AFF" />
+                <Text style={styles.searchingText}>Searching broader area...</Text>
+              </View>
+            ) : (
+              filteredSuggestedPlaces.map((place, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={styles.placeItem}
+                  onPress={() => handlePlaceSelection(place)}
+                >
+                  <View style={styles.placeItemInfo}>
+                    <Text style={styles.placeItemName}>{place.name}</Text>
+                    <Text style={styles.placeItemAddress}>{place.formatted_address}</Text>
+                    {place.rating && (
+                      <View style={styles.placeItemRating}>
+                        <Star size={12} color="#FFD700" strokeWidth={2} fill="#FFD700" />
+                        <Text style={styles.placeItemRatingText}>{place.rating}</Text>
+                      </View>
+                    )}
+                  </View>
+                </TouchableOpacity>
+              ))
+            )}
           </ScrollView>
         </SafeAreaView>
       </Modal>
@@ -1203,6 +1999,29 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
   },
+  analysisHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E5EA',
+    backgroundColor: '#FFFFFF',
+  },
+  backButton: {
+    padding: 8,
+    marginRight: 8,
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#000000',
+    flex: 1,
+    textAlign: 'center',
+  },
+  headerSpacer: {
+    width: 40, // Same width as back button to center the title
+  },
   permissionContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -1222,7 +2041,100 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
     textAlign: 'center',
     lineHeight: 22,
-    marginBottom: 32,
+    marginBottom: 24,
+  },
+  // Enhanced Processing Overlay Styles
+  processingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 12,
+    padding: 20,
+  },
+  processingCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    maxWidth: 280,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  processingSpinner: {
+    marginBottom: 16,
+  },
+  processingTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  processingSubtitle: {
+    fontSize: 14,
+    color: '#8E8E93',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  progressSteps: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  progressStep: {
+    alignItems: 'center',
+    gap: 8,
+  },
+  progressStepActive: {
+    // Active step styling handled by individual elements
+  },
+  progressDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#E5E5EA',
+    borderWidth: 2,
+    borderColor: '#E5E5EA',
+  },
+  progressDotActive: {
+    backgroundColor: '#007AFF',
+    borderColor: '#007AFF',
+  },
+  progressLabel: {
+    fontSize: 12,
+    color: '#8E8E93',
+    fontWeight: '500',
+  },
+  progressLabelActive: {
+    color: '#007AFF',
+    fontWeight: '600',
+  },
+  progressLine: {
+    width: 32,
+    height: 2,
+    backgroundColor: '#E5E5EA',
+  },
+  progressLineActive: {
+    backgroundColor: '#007AFF',
+  },
+  successIcon: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#34C759',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  successIconText: {
+    fontSize: 28,
+    color: '#FFFFFF',
+    fontWeight: 'bold',
   },
   permissionButton: {
     backgroundColor: '#007AFF',
@@ -1331,6 +2243,21 @@ const styles = StyleSheet.create({
   },
   actionBtnDisabled: {
     opacity: 0.6,
+  },
+  primaryActionBtn: {
+    backgroundColor: '#007AFF',
+  },
+  primaryActionBtnText: {
+    color: '#FFFFFF',
+  },
+  saveOnlyBtn: {
+    // Unique identifier to prevent cross-button animation
+  },
+  retakeBtn: {
+    // Unique identifier to prevent cross-button animation
+  },
+  wrongBtn: {
+    // Unique identifier to prevent cross-button animation
   },
   placeHeader: {
     marginBottom: 4,
@@ -1616,9 +2543,57 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#000000',
   },
+  clearSearchButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    backgroundColor: '#007AFF',
+    borderRadius: 12,
+  },
+  clearSearchText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '500',
+  },
   placesList: {
     flex: 1,
     paddingHorizontal: 20,
+  },
+  noResultsContainer: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+  noResultsText: {
+    fontSize: 16,
+    color: '#8E8E93',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  noResultsSubtext: {
+    fontSize: 14,
+    color: '#8E8E93',
+    textAlign: 'center',
+    marginBottom: 16,
+    lineHeight: 20,
+  },
+  searchHintText: {
+    fontSize: 14,
+    color: '#007AFF',
+    textAlign: 'center',
+    fontWeight: '500',
+    lineHeight: 20,
+    marginTop: 8,
+  },
+  searchingContainer: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+  searchingText: {
+    fontSize: 16,
+    color: '#8E8E93',
+    textAlign: 'center',
+    marginTop: 16,
   },
   placeItem: {
     backgroundColor: '#F9F9F9',
@@ -1728,5 +2703,66 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
     textAlign: 'center',
     lineHeight: 20,
+  },
+  hiddenGemBanner: {
+    backgroundColor: '#FFD700',
+    borderRadius: 16,
+    marginBottom: 20,
+    padding: 20,
+    borderWidth: 2,
+    borderColor: '#FFA500',
+    shadowColor: '#FFD700',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  hiddenGemBannerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  hiddenGemBannerIcon: {
+    fontSize: 32,
+    marginRight: 16,
+  },
+  hiddenGemBannerText: {
+    flex: 1,
+  },
+  hiddenGemBannerTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#000000',
+    marginBottom: 4,
+  },
+  hiddenGemBannerSubtitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#2C2C2E',
+    marginBottom: 4,
+  },
+  hiddenGemBannerReward: {
+    fontSize: 14,
+    color: '#8B4513',
+    fontWeight: '500',
+  },
+  discoveryBanner: {
+    backgroundColor: '#E7F3FF',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#007AFF',
+  },
+  discoveryBannerText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#007AFF',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  discoveryBannerSubtext: {
+    fontSize: 14,
+    color: '#5A5A5A',
+    textAlign: 'center',
   },
 });

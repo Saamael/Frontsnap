@@ -39,6 +39,14 @@
         {
           "locationAlwaysAndWhenInUsePermission": "Allow FrontSnap to use your location to identify nearby places"
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#ffffff",
+          "sounds": ["./assets/sounds/notification.wav"]
+        }
       ]
     ],
     "experiments": {

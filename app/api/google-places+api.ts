@@ -61,8 +61,36 @@ export async function GET(request: NextRequest) {
             headers: corsHeaders,
           });
         }
+
+        // VALIDATE COORDINATES
+        const latNum = parseFloat(lat);
+        const lngNum = parseFloat(lng);
         
-        googleUrl += `nearbysearch/json?location=${lat},${lng}&radius=${radius}&key=${GOOGLE_PLACES_API_KEY}`;
+        if (isNaN(latNum) || isNaN(lngNum)) {
+          console.error('❌ Invalid coordinates in API:', { lat, lng });
+          return new Response(JSON.stringify({ 
+            error: 'Invalid coordinate format',
+            status: 'INVALID_REQUEST'
+          }), {
+            status: 400,
+            headers: corsHeaders,
+          });
+        }
+
+        if (latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
+          console.error('❌ Coordinates out of range:', { lat: latNum, lng: lngNum });
+          return new Response(JSON.stringify({ 
+            error: 'Coordinates out of valid range',
+            status: 'INVALID_REQUEST'
+          }), {
+            status: 400,
+            headers: corsHeaders,
+          });
+        }
+
+        console.log(`🗺️ Google Places nearby search: ${latNum.toFixed(6)}, ${lngNum.toFixed(6)} radius=${radius}m`);
+        
+        googleUrl += `nearbysearch/json?location=${latNum},${lngNum}&radius=${radius}&key=${GOOGLE_PLACES_API_KEY}`;
         if (keyword) googleUrl += `&keyword=${encodeURIComponent(keyword)}`;
         if (placeType) googleUrl += `&type=${placeType}`;
         else googleUrl += '&type=restaurant|cafe|store|gym|beauty_salon';
@@ -100,10 +128,26 @@ export async function GET(request: NextRequest) {
             headers: corsHeaders,
           });
         }
-        
+
         googleUrl += `textsearch/json?query=${encodeURIComponent(query)}&key=${GOOGLE_PLACES_API_KEY}`;
+        
         if (searchLat && searchLng) {
-          googleUrl += `&location=${searchLat},${searchLng}&radius=${searchRadius}`;
+          // VALIDATE TEXT SEARCH COORDINATES  
+          const searchLatNum = parseFloat(searchLat);
+          const searchLngNum = parseFloat(searchLng);
+          
+          if (isNaN(searchLatNum) || isNaN(searchLngNum)) {
+            console.error('❌ Invalid text search coordinates:', { searchLat, searchLng });
+            // Continue without location (will search globally - not ideal but won't break)
+          } else if (searchLatNum < -90 || searchLatNum > 90 || searchLngNum < -180 || searchLngNum > 180) {
+            console.error('❌ Text search coordinates out of range:', { lat: searchLatNum, lng: searchLngNum });
+            // Continue without location
+          } else {
+            console.log(`🔍 Google Places text search: "${query}" near ${searchLatNum.toFixed(6)}, ${searchLngNum.toFixed(6)} radius=${searchRadius}m`);
+            googleUrl += `&location=${searchLatNum},${searchLngNum}&radius=${searchRadius}`;
+          }
+        } else {
+          console.warn('⚠️ Text search without location - results may be global');
         }
         break;
         
@@ -177,7 +221,8 @@ export async function GET(request: NextRequest) {
         });
     }
 
-    console.log('Making request to Google Places API:', googleUrl.replace(GOOGLE_PLACES_API_KEY, '[API_KEY]'));
+    const safeUrl = googleUrl.replace(GOOGLE_PLACES_API_KEY, '[API_KEY]');
+    console.log('🌐 Making request to Google Places API:', safeUrl);
     
     const response = await fetch(googleUrl);
     
@@ -187,8 +232,27 @@ export async function GET(request: NextRequest) {
     
     const data = await response.json();
     
-    // Log the response status for debugging
-    console.log('Google Places API response status:', data.status);
+    // ENHANCED RESPONSE LOGGING FOR DEBUGGING
+    if (data.status !== 'OK') {
+      console.error('❌ Google Places API error:', {
+        status: data.status,
+        error_message: data.error_message,
+        results_count: data.results?.length || 0,
+        url: safeUrl
+      });
+    } else {
+      console.log(`✅ Google Places API success: ${data.results?.length || 0} results`);
+      
+      // Log first few results for debugging location issues
+      if (data.results && data.results.length > 0) {
+        console.log('📍 First few results:');
+        data.results.slice(0, 3).forEach((place: any, index: number) => {
+          const lat = place.geometry?.location?.lat;
+          const lng = place.geometry?.location?.lng;
+          console.log(`  ${index + 1}. ${place.name} at ${lat?.toFixed(6)}, ${lng?.toFixed(6)} (${place.vicinity || place.formatted_address})`);
+        });
+      }
+    }
     
     return new Response(JSON.stringify(data), {
       status: 200,

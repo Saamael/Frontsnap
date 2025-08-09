@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx expo start:*)",
+      "Bash(npx expo export:*)",
+      "Bash(rm:*)",
+      "Bash(npx expo install:*)",
+      "Bash(tail:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run:*)",
+      "Bash(find:*)",
+      "Bash(npm test)",
+      "Bash(npx supabase:*)",
+      "Bash(npm install:*)",
+      "Bash(timeout 15 npm run dev)",
+      "Bash(timeout 20 npm run lint)",
+      "Bash(grep:*)",
+      "Bash(sed:*)",
+      "Bash(powershell:*)",
+      "Bash(cmd /c:*)",
+      "Bash(cleanup.bat)",
+      "Bash(npx depcheck:*)",
+      "WebFetch(domain:docs.expo.dev)",
+      "Bash(timeout 20 npm run dev)",
+      "WebFetch(domain:clerk.com)",
+      "WebFetch(domain:clerk.com)",
+      "Bash(npm uninstall:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": []
+  }
+}
